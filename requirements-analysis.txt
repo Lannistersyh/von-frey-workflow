@@ -1,0 +1,4 @@
+# Optional dependencies for the existing Python preview implementation.
+-r requirements.txt
+numpy>=1.24
+scipy>=1.10

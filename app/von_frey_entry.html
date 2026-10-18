@@ -1,0 +1,4087 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<title>Von Frey 机械痛阈 · 原始数据录入</title>
+<meta name="viewport" content="width=1280">
+<meta name="description" content="Von Frey 50% PWT 原始数据录入工具：键盘优先网格、字段级校验、Query 澄清、追加式审计日志、自动保存与导出。">
+<!--
+  设计约束（按《医学数据录入 UI 设计指南 v1.0》）：
+  · 单文件、零 CDN 依赖、file:// 可直接打开（用经典 <script>，不用 type="module"）
+  · 数据只存本机（localStorage + 导出文件），不上传
+  · schema-driven：改 SCHEMA 常量即可换指标
+  · 硬错误拒收、软错误发 Query、空必填格用安静虚线（不标红）
+  · 审计只追加、日志与数据一起导出
+  · 键盘流：Tab/Enter/箭头键 + Ctrl+S
+  · 批量粘贴走「预览 → 确认 → 写入」
+-->
+<style>
+  :root{
+    --paper:#F4F7FB; --card:#FFFFFF; --ink:#1F2B3D; --muted:#5C6C81;
+    --line:#D8E0EB; --line-soft:#E6ECF4; --field:#FFFFFF;
+    --accent:#1C5CAB; --accent-2:#2A78D6; --accent-bg:#E9F0F8;
+    --ok:#2E7D4F; --ok-bg:#E4F3E9;
+    --warn:#8A4B00; --warn-bg:#FBF1DE;
+    --bad:#B3261E; --bad-bg:#FBE8E6;
+    --focus:#B4530A;
+    --mono:'SF Mono',Menlo,Consolas,monospace;
+    --green:#A9D08E; --lb:#9DC3E6; --purple:#B4A7D6;
+  }
+  @media (prefers-color-scheme: dark){
+    :root:not([data-theme="light"]){
+      --paper:#0F141D; --card:#151C28; --ink:#E7EDF6; --muted:#9AAABF;
+      --line:#293447; --line-soft:#1F2836; --field:#1B2433;
+      --accent:#8EB8EE; --accent-2:#A9CBF4; --accent-bg:#182436;
+      --ok:#82CE9C; --ok-bg:#16291D;
+      --warn:#E8B46A; --warn-bg:#2E2412;
+      --bad:#F0948E; --bad-bg:#301917;
+      --focus:#F2B457;
+      --green:#3F5E3F; --lb:#3A5470; --purple:#4E486C;
+    }
+  }
+  *{box-sizing:border-box;}
+  html,body{margin:0;padding:0;background:var(--paper);color:var(--ink);
+    font-family:'PingFang SC','Hiragino Sans GB',-apple-system,'Segoe UI','Microsoft YaHei',sans-serif;
+    font-size:14px;line-height:1.65;}
+  .wrap{max-width:1380px;margin:0 auto;padding:22px 18px 96px;}
+
+  .skip{position:absolute;left:-9999px;top:0;background:var(--accent);color:#fff;
+    padding:8px 14px;border-radius:0 0 6px 0;z-index:99;}
+  .skip:focus{left:0;}
+
+  h1{font-size:22px;margin:0 0 4px;}
+  h2{font-size:16px;margin:24px 0 10px;display:flex;align-items:center;gap:9px;}
+  h2 .n{display:inline-flex;align-items:center;justify-content:center;width:24px;height:24px;
+    border-radius:6px;background:var(--accent);color:#fff;font-size:12.5px;font-weight:700;flex:none;}
+  h3{font-size:13.5px;margin:14px 0 6px;color:var(--accent);}
+  .kicker{font-size:11px;letter-spacing:.18em;text-transform:uppercase;color:var(--muted);font-weight:700;}
+  .lede{color:var(--muted);font-size:12.5px;max-width:92ch;margin:4px 0 0;}
+  code,.mono{font-family:var(--mono);}
+  code{background:var(--accent-bg);border-radius:3px;padding:1px 5px;font-size:12px;}
+  .sr{position:absolute;width:1px;height:1px;overflow:hidden;clip:rect(0 0 0 0);white-space:nowrap;}
+  /* 可见提示条：固定在右下角，键盘/读屏用户也能看到 */
+  /* 背景不能用 var(--ink)：深色主题下 --ink 是**浅色**，配白字会白底白字看不见。
+     用固定的高对比深色，两个主题下都清楚。 */
+  .toast{position:fixed;right:16px;bottom:16px;z-index:9999;max-width:min(460px,calc(100vw - 32px));
+    padding:11px 15px;border-radius:9px;background:#1F2B3D;color:#FFFFFF;font-size:13px;line-height:1.5;
+    border:1px solid rgba(255,255,255,.18);
+    box-shadow:0 6px 22px rgba(0,0,0,.42);opacity:0;transform:translateY(8px);
+    transition:opacity .18s ease,transform .18s ease;pointer-events:none;}
+  .toast.show{opacity:1;transform:translateY(0);}
+  .toast.err{background:#8A1F1F;border-color:rgba(255,255,255,.3);}
+  /* 归档目录常驻条：明确告诉用户文件写到哪了，不能让人猜 */
+  .archive-bar{display:flex;align-items:center;gap:10px;flex-wrap:wrap;
+    padding:8px 11px;border-radius:7px;background:var(--paper);border:1px solid var(--line);font-size:12px;}
+  .archive-bar .ab-k{color:var(--muted);flex:none;}
+  .archive-bar .ab-v{font-family:var(--mono,monospace);font-weight:600;color:var(--ink);word-break:break-all;}
+  .archive-bar .ab-hint{margin:0 0 0 auto;color:var(--muted);}
+  .archive-bar.set .ab-v{color:var(--ok);}
+  .archive-bar.unset .ab-v{color:var(--warn);}
+  @media (prefers-reduced-motion: reduce){ .toast{transition:none;} }
+
+  .card{background:var(--card);border:1px solid var(--line);border-radius:8px;padding:14px 16px;margin-bottom:12px;}
+  .row{display:flex;flex-wrap:wrap;gap:12px;align-items:flex-end;}
+  label.f{display:flex;flex-direction:column;gap:4px;font-size:12px;color:var(--muted);font-weight:600;}
+  label.f > span > .req{color:var(--bad);font-weight:700;margin-left:2px;}
+  input[type=text],input[type=number],select,textarea{
+    background:var(--field);color:var(--ink);border:1px solid var(--line);border-radius:6px;
+    padding:6px 9px;font:inherit;min-height:32px;min-width:120px;}
+  input[type=text]{font-variant-numeric:tabular-nums;}
+  textarea{min-height:52px;resize:vertical;font-family:var(--mono);font-size:12px;}
+  :focus-visible{outline:2px solid var(--focus);outline-offset:1px;}
+  button{background:var(--accent);color:#fff;border:0;border-radius:6px;padding:7px 13px;
+    font:inherit;font-weight:600;cursor:pointer;min-height:32px;}
+  button.sec{background:var(--card);color:var(--accent);border:1px solid var(--accent);}
+  button.tiny{padding:4px 9px;font-size:12px;min-height:26px;}
+  button.danger{background:var(--bad);}
+  button:disabled{opacity:.45;cursor:not-allowed;}
+  .hint{font-size:11.5px;color:var(--muted);margin-top:5px;}
+  .kbd{font-family:var(--mono);font-size:11.5px;background:var(--paper);border:1px solid var(--line);
+    border-bottom-width:2px;border-radius:4px;padding:1px 5px;white-space:nowrap;}
+
+  .pill{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:999px;
+    font-size:11.5px;font-weight:700;font-variant-numeric:tabular-nums;white-space:nowrap;}
+  .pill.ok{background:var(--ok-bg);color:var(--ok);}
+  .pill.warn{background:var(--warn-bg);color:var(--warn);}
+  .pill.bad{background:var(--bad-bg);color:var(--bad);}
+  .pill.info{background:var(--accent-bg);color:var(--accent);}
+
+  .toolbar{display:flex;gap:7px;flex-wrap:wrap;margin-bottom:9px;align-items:center;}
+  .toolbar .sep{width:1px;height:22px;background:var(--line);margin:0 4px;}
+  .banner{border-radius:6px;padding:9px 12px;font-size:12.5px;margin-bottom:10px;display:none;gap:8px;align-items:flex-start;}
+  .banner.show{display:flex;}
+  .banner.bad{background:var(--bad-bg);color:var(--bad);border:1px solid var(--bad);}
+  .banner.warn{background:var(--warn-bg);color:var(--warn);border:1px solid var(--warn);}
+  .banner.info{background:var(--accent-bg);color:var(--accent);border:1px solid var(--accent);}
+
+  .gridwrap{overflow:auto;background:var(--card);border:1px solid var(--line);border-radius:8px;
+    max-height:70vh;}
+  table.grid{border-collapse:separate;border-spacing:0;width:100%;font-size:13px;}
+  table.grid th,table.grid td{border-bottom:1px solid var(--line-soft);border-right:1px solid var(--line-soft);
+    padding:5px 8px;text-align:left;vertical-align:top;background:var(--card);}
+  table.grid td:last-child,table.grid th:last-child{border-right:0;}
+  table.grid thead th{position:sticky;top:0;z-index:3;background:var(--card);font-size:11.5px;color:var(--muted);
+    border-bottom:1.5px solid var(--line);white-space:nowrap;}
+  table.grid thead th.tp-h{text-align:center;}
+  table.grid thead th.tp-h .lbl{display:block;color:var(--accent);font-weight:700;font-size:12.5px;}
+  table.grid thead th.tp-h .u{display:block;font-size:10px;color:var(--muted);font-family:var(--mono);margin-top:1px;}
+  /* 已废弃时间点（来自旧版 schema） */
+  table.grid thead th.tp-deprecated{background:var(--warn-bg) !important;}
+  table.grid thead th.tp-deprecated .lbl{color:var(--warn) !important;}
+  table.grid thead th.tp-deprecated .u{color:var(--warn) !important;font-weight:600;}
+  table.grid td.tp-deprecated-c{background:var(--warn-bg);}
+
+  /* ── 组分隔条 subhead（视觉分组）── */
+  table.grid tr.grp-subhead td.grp-subhead-td{
+    padding:6px 12px;font-size:12px;font-weight:700;color:var(--ink);
+    border-top:1.5px solid var(--line);border-bottom:1px solid var(--line-soft);
+  }
+  table.grid tr.grp-subhead td .grp-subhead-lbl{font-weight:700;}
+  table.grid tr.grp-subhead td .grp-subhead-count{font-weight:400;color:var(--muted);margin-left:6px;}
+  /* 6 个稳定配色（按 grp 名 hash 分配） */
+  .grp-color-0{background:#E9F0F8;}
+  .grp-color-1{background:#F8EAE9;}
+  .grp-color-2{background:#E9F4E5;}
+  .grp-color-3{background:#F5EEF8;}
+  .grp-color-4{background:#FBF1DE;}
+  .grp-color-5{background:#E5F2F0;}
+  @media (prefers-color-scheme: dark){
+    .grp-color-0{background:#1E2C3D;}
+    .grp-color-1{background:#3D2525;}
+    .grp-color-2{background:#243D26;}
+    .grp-color-3{background:#322540;}
+    .grp-color-4{background:#3D2F1E;}
+    .grp-color-5{background:#1E3D38;}
+  }
+  /* 分组表头（横跨多列） */
+  table.grid thead th.tp-grp-h{
+    text-align:center;background:var(--accent-bg);
+    border-bottom:1.5px solid var(--accent);
+    color:var(--accent);font-weight:700;
+  }
+  table.grid thead th.tp-grp-h .lbl{display:block;font-size:13.5px;}
+  table.grid thead th.tp-grp-h .u{display:block;font-size:10px;color:var(--muted);font-weight:400;font-family:var(--mono);margin-top:1px;}
+  table.grid td.sticky-c, table.grid th.sticky-c{
+    position:sticky;left:0;z-index:2;background:var(--paper);box-shadow:1px 0 0 var(--line);}
+  table.grid thead th.sticky-c{z-index:4;}
+  table.grid td.subid{font-family:var(--mono);font-weight:700;font-size:12.5px;min-width:130px;}
+  /* 动物编号重复时打红框（配合 state 里的阻止逻辑，给出可见反馈） */
+  table.grid td.subid input.bad{border-color:var(--bad);background:var(--bad-bg);color:var(--bad);}
+  table.grid td.grp{font-family:var(--mono);font-size:12px;min-width:90px;}
+  table.grid td.wt{font-family:var(--mono);font-size:12px;min-width:80px;text-align:right;}
+  table.grid td.note-c{font-size:12px;min-width:160px;}
+  table.grid td.del-c{text-align:center;min-width:54px;}
+
+  .tp{position:relative;display:flex;flex-direction:column;gap:3px;min-width:200px;padding:2px 0;}
+  .tp .seq-row{display:flex;align-items:center;gap:4px;}
+  .tp .seq-inp{flex:1;min-width:100px;font-family:var(--mono);font-size:13.5px;letter-spacing:1.5px;
+    padding:5px 8px;background:var(--field);}
+  .tp .start-sel{font-family:var(--mono);font-size:11px;min-width:64px;padding:4px 6px;
+    background:var(--paper);}
+  .tp .pwt-row{display:flex;justify-content:space-between;align-items:center;
+    font-size:11.5px;color:var(--muted);min-height:20px;gap:6px;}
+  .tp .pwt-val{font-family:var(--mono);font-weight:700;color:var(--ink);font-variant-numeric:tabular-nums;font-size:13px;}
+  .tp .pwt-val.derived{font-style:italic;color:var(--accent);}
+  .tp .pwt-val.override{color:var(--ok);font-style:normal;}
+  .tp .mark{position:absolute;right:0;top:-1px;font-weight:700;font-size:11.5px;pointer-events:none;
+    padding:1px 6px;border-radius:0 0 0 5px;background:var(--card);}
+  .tp.bad{box-shadow:inset 0 0 0 2px var(--bad);border-radius:4px;background:var(--bad-bg);}
+  .tp.bad .mark{color:var(--bad);}
+  .tp.warn{box-shadow:inset 0 0 0 2px var(--warn);border-radius:4px;background:var(--warn-bg);}
+  .tp.warn .mark{color:var(--warn);}
+  .tp.miss .seq-inp{border-style:dashed;}
+  .tp.miss .mark{color:var(--muted);font-weight:400;}
+  .tp.ok .mark{color:var(--ok);}
+  .tp .err{position:absolute;left:0;top:calc(100% + 2px);z-index:6;display:none;background:var(--bad-bg);
+    color:var(--bad);border:1px solid var(--bad);border-radius:5px;padding:5px 8px;font-size:11.5px;
+    width:max-content;max-width:300px;line-height:1.5;box-shadow:0 3px 10px rgba(0,0,0,.2);text-align:left;}
+  .tp.warn .err{background:var(--warn-bg);color:var(--warn);border-color:var(--warn);}
+  .tp.bad:focus-within .err,.tp.bad:hover .err,
+  .tp.warn:focus-within .err,.tp.warn:hover .err{display:block;}
+
+  .seq-vis{font-family:var(--mono);font-size:12.5px;letter-spacing:1.5px;min-height:18px;
+    color:var(--ink);padding:1px 2px;}
+  .seq-vis .gx.o{color:var(--ok);font-weight:700;}
+  .seq-vis .gx.x{color:var(--bad);font-weight:700;}
+  .seq-vis .gx.g{color:#2A5C2A;}
+  .seq-vis .gx.lb{color:#1F4E79;}
+  .seq-vis .gx.p{color:#4D3972;}
+
+  .check{display:flex;gap:10px;align-items:flex-start;padding:7px 0;border-bottom:1px dashed var(--line-soft);}
+  .check:last-child{border-bottom:0;}
+  .check .ic{font-weight:700;width:18px;flex:none;text-align:center;}
+  .check.ok .ic{color:var(--ok);} .check.warn .ic{color:var(--warn);} .check.bad .ic{color:var(--bad);}
+  .check .tt{font-weight:700;font-size:12.5px;flex:none;min-width:170px;}
+  .check .ms{font-size:12.5px;color:var(--muted);}
+  .issue{display:flex;gap:9px;align-items:flex-start;padding:5px 0;border-bottom:1px dashed var(--line-soft);
+    font-size:12.5px;}
+  .issue:last-child{border-bottom:0;}
+  .issue .ic{font-weight:700;width:16px;flex:none;text-align:center;}
+  .issue.bad .ic{color:var(--bad);} .issue.miss .ic{color:var(--muted);}
+  .issue a{color:var(--accent);font-family:var(--mono);font-size:12px;flex:none;min-width:180px;
+    text-decoration:underline;text-underline-offset:2px;cursor:pointer;}
+  .issue .ms{color:var(--muted);}
+
+  .query{display:grid;grid-template-columns:200px 110px 1fr auto;gap:10px;align-items:center;
+    padding:8px 0;border-bottom:1px dashed var(--line-soft);}
+  .query .where{font-family:var(--mono);font-size:12px;}
+  .query .val{font-family:var(--mono);font-size:12.5px;color:var(--warn);font-weight:700;}
+
+  .audit{max-height:300px;overflow:auto;font-family:var(--mono);font-size:11.5px;line-height:1.75;
+    border:1px solid var(--line-soft);border-radius:5px;padding:8px 10px;background:var(--paper);}
+  .audit .ln{display:grid;grid-template-columns:130px 90px 1fr;gap:10px;padding:2px 0;
+    border-bottom:1px dashed var(--line-soft);}
+  .audit .ts{color:var(--muted);}
+  .audit .ac{font-weight:700;color:var(--accent);}
+  .audit .old{color:var(--bad);text-decoration:line-through;}
+  .audit .new{color:var(--ok);font-weight:700;}
+
+  pre.out{background:var(--paper);border:1px solid var(--line-soft);border-radius:6px;padding:11px 13px;
+    max-height:340px;overflow:auto;font-family:var(--mono);font-size:11.5px;line-height:1.6;
+    white-space:pre;margin:0;}
+
+  .paste-preview{border:1px solid var(--line);border-radius:6px;padding:10px;margin-top:8px;
+    background:var(--paper);max-height:300px;overflow:auto;}
+  .paste-preview table{width:100%;border-collapse:collapse;font-size:12px;}
+  .paste-preview th,.paste-preview td{border-bottom:1px solid var(--line-soft);padding:4px 8px;text-align:left;}
+  .paste-preview th{background:var(--card);font-size:11px;color:var(--muted);}
+  .paste-preview tr.add td{background:var(--ok-bg);}
+  .paste-preview tr.mod td{background:var(--accent-bg);}
+  .paste-preview tr.bad td{background:var(--bad-bg);color:var(--bad);}
+
+  /* 时间点分组编辑器 */
+  .tp-grp{background:var(--paper);border:1px solid var(--line);border-radius:6px;padding:10px 12px;margin-bottom:8px;}
+  .tp-grp .grp-h{display:flex;align-items:center;gap:8px;margin-bottom:6px;}
+  .tp-grp .grp-h .grp-lbl{font-weight:700;color:var(--accent);font-size:13px;}
+  .tp-grp .grp-h input{font-weight:700;color:var(--accent);font-size:13px;background:var(--card);}
+  .tp-kids{display:flex;flex-wrap:wrap;gap:6px;padding:6px 0;}
+  .tp-kid{display:inline-flex;align-items:center;gap:5px;background:var(--card);
+    border:1px solid var(--line);border-radius:5px;padding:4px 8px;font-size:12px;}
+  .tp-kid .kid-key{font-family:var(--mono);color:var(--muted);font-size:11px;}
+  .tp-kid .kid-lbl{font-weight:600;}
+  .tp-kid input.kid-lbl{font-weight:600;font-size:12.5px;padding:2px 5px;min-width:80px;}
+  .tp-kid button{padding:1px 6px;font-size:11px;min-height:20px;line-height:1;}
+  /* 排序：拖拽 + 按钮 */
+  .tp-kid.dragging{opacity:.4;}
+  .tp-kid.drop-before{box-shadow:-3px 0 0 var(--accent);}
+  .tp-kid.drop-after{box-shadow:3px 0 0 var(--accent);}
+  .tp-kid .mv{padding:1px 5px;font-size:10px;min-height:18px;line-height:1;opacity:.55;}
+  .tp-kid .mv:hover{opacity:1;}
+  .tp-kid .mv[disabled]{opacity:.18;cursor:not-allowed;}
+  .tp-kid.drag-handle{cursor:grab;}
+  .tp-kid.drag-handle:active{cursor:grabbing;}
+  .sort-bar{display:flex;align-items:center;gap:8px;flex-wrap:wrap;margin:0 0 10px;}
+  .sort-bar .sp{flex:1;}
+  .tp-kid button.danger{background:var(--bad);color:#fff;}
+  .tp-fixed{background:var(--accent-bg);color:var(--accent);font-style:italic;}
+
+  .override-input{font-family:var(--mono);font-size:11px;padding:2px 4px;width:64px;
+    background:var(--paper);border:1px dashed var(--warn);border-radius:3px;}
+
+  @media print{
+    :root{--paper:#fff;--card:#fff;}
+    .wrap{max-width:none;padding:0;}
+    .no-print{display:none !important;}
+    .skip{display:none;}
+    table.grid thead th{position:static;}
+    .gridwrap{overflow:visible;max-height:none;}
+    .tp .err{display:none !important;}
+    .tp .mark{display:none !important;}
+    body{font-size:11px;}
+    h2{page-break-after:avoid;}
+    tr{page-break-inside:avoid;}
+    table.grid thead{display:table-header-group;}
+    .card{border-color:#999;}
+    .pill{border:1px solid #666;}
+  }
+</style>
+</head>
+<body>
+<a class="skip" href="#main">跳到主内容</a>
+<div id="liveRegion" class="sr" role="status" aria-live="polite"></div>
+<!-- 可见提示条：#liveRegion 是 .sr（仅供读屏），视觉用户看不到任何反馈，
+     导致"点了没反应"的错觉。所有 announce() 同时写这里。 -->
+<div id="toast" class="toast no-print" role="status" aria-live="polite" hidden></div>
+
+<div class="wrap">
+
+  <header>
+    <div class="kicker">Von Frey · 机械痛阈 · 50% PWT</div>
+    <h1>Von Frey 原始数据录入</h1>
+    <p class="lede">
+      单文件、离线可用。每只鼠一行；每个时间点一格：直接打字 <code>oooxoxox</code> 即时算 PWT（MLE + k 查表法互证）。
+      硬错误（<code>!</code>）阻止导出；软疑问（<code>△</code>）走 Query 面板填理由；录入人 + 时间戳自动落进每条数据。
+      改 <code>SCHEMA</code> 常量即可换套件。
+    </p>
+  </header>
+
+  <div id="bannerQuota" class="banner bad no-print">
+    <span>⚠</span>
+    <span><b>本机存储已满，自动保存停止。</b>请立刻点 ⑤「下载 JSON 备份」导出数据，再清理旧草稿，否则关闭页面会丢失未导出的修改。</span>
+  </div>
+  <div id="bannerDraft" class="banner info no-print">
+    <span>↺</span>
+    <span><b>检测到上次未导出的草稿</b>（<span id="draftWhen" class="mono"></span>）。
+      <button class="tiny sec" id="btnRestoreDraft" style="margin-left:6px;">恢复</button>
+      <button class="tiny sec" id="btnDiscardDraft">丢弃</button>
+    </span>
+  </div>
+
+<aside style="margin:12px auto;max-width:1400px;padding:12px 16px;border:1px solid #9dc5de;background:#f0f8ff;border-radius:10px;">Workflow showcase · 演示示例均为模拟数据，非真实实验结果。界面可用于本地录入；操作须遵循本实验批准方案。</aside>
+  <main id="main">
+
+    <section aria-labelledby="h-meta">
+      <h2 id="h-meta"><span class="n">1</span>批次信息（录一次，整批复用）</h2>
+      <div class="card">
+        <div class="row">
+          <label class="f"><span>方案 / 批次编号<span class="req" title="必填">*</span></span>
+            <input type="text" id="m-protocol" autocomplete="off" placeholder="例：VF-2026-09" aria-required="true">
+          </label>
+          <label class="f"><span>录入人（操作者）<span class="req" title="必填">*</span></span>
+            <input type="text" id="m-operator" autocomplete="off" placeholder="姓名 / 工号" aria-required="true">
+          </label>
+          <label class="f">设备 / 套件
+            <input type="text" id="m-device" placeholder="例：North Coast Aesthesio 0.07–2.0 g">
+          </label>
+          <label class="f">实验日期
+            <input type="text" id="m-date" inputmode="numeric" placeholder="YYYY-MM-DD">
+          </label>
+        </div>
+        <div class="row" style="margin-top:10px;">
+          <label class="f" style="flex:1;min-width:320px;">批次备注（写进 meta，不当数据字段）
+            <textarea id="m-notes" rows="2" placeholder="例：造模 08-10 17:00 · 给药 08-11 16:00 · 室温 23 °C"></textarea>
+          </label>
+        </div>
+        <div class="row" style="margin-top:10px;">
+          <label class="f">纤维丝套件
+            <select id="m-kit">
+              <option value="aesthesia20">Aesthesia 实物套装 0.008–300 g（20 档）</option>
+              <option value="standard">小鼠常用 0.07–2.0 g（7 档）</option>
+              <option value="extended">（旧）扩展 0.008–4.0 g（11 档）</option>
+            </select>
+          </label>
+          <label class="f" style="flex-direction:row;align-items:center;gap:7px;">PWT 覆盖模式
+            <select id="m-allowOverride" style="min-width:auto;">
+              <option value="off">关（仅展示派生值）</option>
+              <option value="on">开（允许手填覆盖）</option>
+            </select>
+          </label>
+          <label class="f">ID 前缀（用于网站 CSV）
+            <input type="text" id="m-idPrefix" placeholder="例：DEMO，留空则不加" autocomplete="off">
+          </label>
+          <label class="f">起点力值默认 (g)
+            <select id="m-defaultStart">
+              <option value="0.07">0.07</option>
+              <option value="0.16">0.16</option>
+              <option value="0.4">0.4</option>
+              <option value="0.6">0.6</option>
+              <option value="1.0">1.0</option>
+            </select>
+          </label>
+        </div>
+        <p class="hint" id="kitHint"></p>
+        <div class="row" style="margin-top:8px;align-items:flex-end;">
+          <label class="f" style="flex:1;min-width:320px;">纤维丝力值序列（整段复制到网站 Custom Steps）
+            <input type="text" id="filamentList" readonly spellcheck="false"
+                   style="font-family:var(--mono,monospace);font-size:12px;"
+                   aria-label="当前套件的纤维丝力值序列，可复制">
+          </label>
+          <button class="tiny" type="button" id="btnCopyFilaments">复制全套</button>
+          <button class="tiny sec" type="button" id="btnCopyUsedFilaments"
+                  title="只包含你数据里实际用到的档位（按升-降规则走出来的力值）">只复制用到的</button>
+        </div>
+        <p class="hint" style="margin-top:2px;">
+          网站设置请选 <b>Force</b> + <b>Exact</b>；把上面的内容整段粘进 <b>Custom Steps</b>（逗号+空格分隔，与官网示例同格式）。
+        </p>
+          <p class="hint">单位在整批数据里<b>锚定</b>，改动会被审计并要求理由。
+          <b>起点力值默认</b>：表里每格起点留空时按这个值算 PWT，且与每格下拉框显示的值<b>始终一致</b>。</p>
+      </div>
+
+      <!-- 时间点分组编辑器（独立 tp + 分组下的子时间点） -->
+      <div class="card">
+        <h3 style="margin-top:0;">时间点结构</h3>
+        <p class="hint" style="margin-top:0;">
+          这里管的是<b>表头的列</b>（时间点），不是动物的分组。<br>
+          · 造模前 / 造模后 是固定列，<b>不能删</b>。<br>
+          · 「给药后」这类<b>时间点组</b>用来把若干时间点并到一个横跨表头下；组内时间点（默认 0.5/1/1.5/2/3/4h）可 <b>加 / 删 / 重命名</b>。<br>
+          · 组可以整个 <b>删除本组</b>（会连组内时间点和已录数据一起删）。<br>
+          · 子时间点的 <b>label</b> 会原样写进网站 CSV 的 ID（如 <code>M1-药效2h</code>）。<br>
+          · ⚠ 想让<b>动物</b>分成几组（如 Example-A / Example-B / 溶剂组），请在下面②表的 <b>「组别」列</b> 填 —— 填完离开该格，网格会自动出现组分隔条。
+        </p>
+        <div id="tpEditor"></div>
+      </div>
+    </section>
+
+    <section aria-labelledby="h-grid">
+      <h2 id="h-grid"><span class="n">2</span>逐只逐点录入（键盘优先）</h2>
+
+      <div class="card no-print">
+        <div class="toolbar">
+          <button id="btnAddSubject" class="tiny">+ 添加动物</button>
+          <label class="f" style="flex-direction:row;align-items:center;gap:7px;">新编号前缀
+            <input type="text" id="subPrefix" value="M" style="min-width:64px;width:64px;">
+          </label>
+          <span class="pill info" id="progressPill" role="status">已填 0 / 0 项</span>
+          <span class="pill ok" id="savePill" role="status">已保存 —</span>
+          <span style="flex:1"></span>
+          <button class="sec tiny" id="btnUndo" disabled>↶ 撤销</button>
+          <button class="sec tiny" id="btnPasteOpen">📋 批量粘贴</button>
+          <button class="sec tiny" id="btnLoadDemo" title="载入 4 只模拟动物的功能演示数据，不含真实实验记录">载入模拟 demo</button>
+          <button class="sec tiny" id="btnSetStartAll" title="把当前批次所有 cell 的起点力值统一改成默认 0.16 g">全部起点 → 0.16</button>
+          <button class="danger tiny" id="btnClear">清空全部</button>
+        </div>
+        <p class="hint" style="margin:0 0 8px 0;">
+          键盘：<span class="kbd">Tab</span>/<span class="kbd">Shift+Tab</span> 横向；
+          <span class="kbd">Enter</span> 同列下一行；
+          <span class="kbd">↑</span>/<span class="kbd">↓</span> 同列上下；
+          <span class="kbd">Ctrl/Cmd+S</span> 立即保存。
+        </p>
+        <div id="pasteBox" style="display:none;">
+          <label class="f" for="pasteArea">粘贴区（Excel / CSV；带表头时按列名识别；不带表头按位置：<span class="mono">id, timepoint, seq, startForce, note</span>）
+            <textarea id="pasteArea" rows="7" class="mono" spellcheck="false"
+              placeholder="示例：&#10;id&#9;timepoint&#9;seq&#9;startForce&#9;note&#10;DEMO-001&#9;pre&#9;oxoxox&#9;0.16&#9;&#10;DEMO-001&#9;model&#9;xoxoxo&#9;0.16&#9;&#10;DEMO-001&#9;post&#9;oooxoxox&#9;0.16&#9;"></textarea>
+          </label>
+          <div class="toolbar" style="margin-top:7px;">
+            <button class="tiny" id="btnPastePreview">预览</button>
+            <button class="tiny" id="btnPasteApply" disabled>确认写入</button>
+            <button class="tiny sec" id="btnPasteClose">收起</button>
+            <span class="hint" style="margin:0;">先预览再确认；不覆盖空单元格；新动物/时间点自动创建（记审计）。</span>
+          </div>
+          <div id="pastePreview" class="paste-preview" style="display:none;"></div>
+        </div>
+      </div>
+
+      <div class="gridwrap">
+        <table class="grid" id="grid" aria-describedby="gridHelp">
+          <caption id="gridHelp" class="sr">Von Frey 数据网格。每行是一只鼠；每个时间点是一格，单元格含 O/X 序列输入框、起点力值下拉、实时 PWT 预览与状态标。</caption>
+          <thead id="gridHead"></thead>
+          <tbody id="gridBody"></tbody>
+        </table>
+      </div>
+      <p class="hint">
+        <b>!</b> = 硬错误（格式错 / 序列 <6 位 / 力值非法，会阻止导出）；
+        <b>△</b> = 软疑问（PWT 超出常规范围，须在下方 Query 面板填理由并勾"已复核"）；
+        <b>–</b> = 必填但未录（安静虚线，不是错误）；
+        符号 + 文字 + 颜色三重编码，不靠颜色单独传递状态。
+      </p>
+    </section>
+
+    <section aria-labelledby="h-check">
+      <h2 id="h-check"><span class="n">3</span>数据校验 + Query 澄清</h2>
+      <div class="card">
+        <div id="checkList" role="list"></div>
+        <h3>错误明细（点击条目可跳到那一格）</h3>
+        <div id="issueList" role="list"></div>
+        <div id="secQuery" style="display:none;margin-top:14px;">
+          <h3>Query 澄清（超出常规范围的值须填理由）</h3>
+          <p class="hint" style="margin-top:0;">
+            Query 是医学数据管理的标准做法：超范围但属实的值<b>不应被静默接受</b>，也不应被硬拒；
+            系统列出疑问，录入者填理由并勾"已复核"，理由随数据一起存档。
+          </p>
+          <div id="queryList" role="list"></div>
+        </div>
+      </div>
+    </section>
+
+    <section aria-labelledby="h-audit">
+      <h2 id="h-audit"><span class="n">4</span>变更审计日志（追加式，不可编辑）</h2>
+      <div class="card">
+        <p class="hint" style="margin-top:0;">
+          每条记录的创建 / 修改 / 删除都会自动记入审计，含录入人、时间戳、旧值与新值。
+          审计与数据一起导出，不可单独修改。
+        </p>
+        <div class="audit" id="auditLog" role="log" aria-label="变更审计日志"></div>
+      </div>
+    </section>
+
+    <section aria-labelledby="h-export">
+      <h2 id="h-export"><span class="n">5</span>导出</h2>
+      <div class="card">
+        <div class="toolbar no-print">
+          <button id="btnCsv">下载 CSV（长表）</button>
+          <button class="sec" id="btnJson">下载 JSON（含审计）</button>
+          <button class="sec" id="btnEntryPy">下载 entry_data.py 片段</button>
+          <button class="sec" id="btnClip">复制 JSON</button>
+          <button class="sec" id="btnPrint">打印数据表 / 存 PDF</button>
+        </div>
+        <div class="banner warn no-print" id="bannerBlocked" style="margin-bottom:10px;">
+          <span>⚠</span><span id="blockedMsg"></span>
+        </div>
+        <h3>导出预览</h3>
+        <pre class="out" id="out" tabindex="0" aria-label="导出内容预览">录入数据后这里显示导出内容。</pre>
+        <p class="hint">
+          CSV 是<b>长表</b>：一行 = 一只鼠 × 一个时间点 × 一项指标，
+          列含 <span class="mono">subject, timepoint, metric, value, unit, status, reason, operator, recorded_at, protocol, device</span>。
+          JSON 含完整 state + 审计日志，可再导入。entry_data.py 片段直接粘到 <span class="mono">exports/entry_data.py</span>。
+          <b>导出完成后才算落地</b>，本机 localStorage 随时可能被浏览器清理。
+        </p>
+      </div>
+    </section>
+
+    <section aria-labelledby="h-web">
+      <h2 id="h-web"><span class="n">6</span>与 DTU/Rigshospitalet 在线工具 联动</h2>
+      <div class="card">
+        <div class="toolbar no-print">
+          <button id="btnExportWeb">① 导出网站格式 CSV（可直接上传）</button>
+          <button class="sec" id="btnImportWeb">② 导入网站结果 CSV</button>
+          <button class="sec" id="btnClearWeb">清空导入</button>
+        </div>
+        <p class="hint" style="margin-top:0;">
+          在线工具：<a href="https://bioapps.shinyapps.io/von_frey_app/" target="_blank" rel="noopener">bioapps.shinyapps.io/von_frey_app</a>（Christensen et al., <i>Eur J Pain</i> 2020）。
+          网站接受的输入列：<span class="mono">ID, Final Filament, XO Pattern</span>（不区分大小写，逗号/分号分隔，欧洲小数点也认）；
+          输出列：<span class="mono">ID, XO Pattern, Final Filament, k-value, delta-value, 50% Threshold</span>。
+          导入后每格 PWT 旁会显示<b>⇆ 网站值</b>（斜体绿），与本工具 MLE 派生值并列便于对照。
+        </p>
+        <h3>ID 编码约定</h3>
+        <p class="hint">
+          与 <span class="mono">exports/*_von_Frey_results.csv</span> 完全一致：
+          <code><药物前缀>-<动物>-<时间点标签></code>，例如 <code>DEMO-001-基础值</code>、<code>DEMO-001-药效0.5h</code>。
+          ① 节里设 <b>ID 前缀</b>；时间点标签沿用本面板时间点的 label（如 造模前→基础值、造模后→造模后、给药后→药效0.5h）。
+        </p>
+        <h3>导入（粘贴或选文件）</h3>
+        <div class="toolbar">
+          <label class="f" style="flex:1;min-width:280px;">粘贴网站下载的 CSV
+            <textarea id="webPasteArea" rows="5" class="mono" spellcheck="false"
+              placeholder="把网站下载的 CSV 内容粘到这里…"></textarea>
+          </label>
+        </div>
+        <div class="toolbar" style="margin-top:6px;">
+          <button class="tiny" id="btnPreviewWebImport">预览</button>
+          <button class="tiny" id="btnApplyWebImport" disabled>确认导入</button>
+          <button class="tiny sec" id="btnImportWebFile">或选文件…</button>
+          <input type="file" id="webFile" accept=".csv,.txt,text/csv,text/plain" style="display:none">
+          <span class="hint" style="margin:0;">先预览再确认；不覆盖空行；不匹配的时间点会跳过并在预览里标红。</span>
+        </div>
+        <div id="webImportPreview" class="paste-preview" style="display:none;"></div>
+        <h3>归档到项目文件夹</h3>
+        <div class="toolbar">
+          <button class="tiny" id="btnArchiveTo">归档到文件夹…</button>
+          <button class="tiny sec" id="btnArchiveDownload">或下载归档副本</button>
+          <button class="tiny sec" id="btnArchivePick" hidden title="换一个归档文件夹">改归档目录</button>
+          <button class="tiny sec" id="btnArchiveOpen" hidden title="在访达/资源管理器中打开该文件夹">打开目录</button>
+        </div>
+        <div class="archive-bar" id="archiveBar">
+          <span class="ab-k">当前归档目录</span>
+          <span class="ab-v" id="archiveDirName">（尚未设置）</span>
+          <span class="ab-hint" id="archiveStatus"></span>
+        </div>
+        <div style="margin-top:6px;">
+        </div>
+        <p class="hint" style="margin:4px 0 0;">
+          把<b>网站原始 CSV + 原始数据 + 长表 + state.json</b> 一次性写进你选的文件夹
+          （建议选项目里的 <code>exports/reference/</code>），以后不必再从 Downloads 翻。
+          目录选一次会被记住，下次一键归档。
+        </p>
+        <h3>对照表（派生 vs 网站）</h3>
+        <div id="webCompare" class="paste-preview" style="display:none;"></div>
+      </div>
+    </section>
+
+  </main>
+
+  <footer style="margin-top:36px;padding-top:14px;border-top:1px solid var(--line);
+    font-size:11.5px;color:var(--muted);display:flex;gap:18px;flex-wrap:wrap;">
+    <span>本工具遵循《医学数据录入 UI 设计指南 v1.0》。</span>
+    <span>PWT 算法与 <code>analysis/pwt_mle.py</code> 一致（MLE + k 查表法）。</span>
+    <span>数据只存本机；不上传任何服务器。</span>
+  </footer>
+
+</div>
+
+<script>
+'use strict';
+
+/* ══════════════════════════════════════════════════════════════════════════
+ *  1. SCHEMA
+ * ══════════════════════════════════════════════════════════════════════════ */
+const SCHEMA = {
+  version: 'v2.0',
+  /* ── 套件：单一数据源 ──────────────────────────────────
+     以前每个套件要把同一批数字写三遍（fibers 数组 + LOGS 映射 + colors 映射），
+     改其中一处忘了另两处就是**静默错误**（能跑但算错）。
+     现在只写 pairs（[力值, 手柄号, 颜色码]），其余由 makeKit() 派生。 */
+  KIT_PAIRS: {
+    standard: {
+      label: '小鼠常用 0.07–2.0 g（7 档）',
+      defaultStart: 0.16,
+      pairs: [[0.07,2.83],[0.16,3.22],[0.4,3.61],[0.6,3.84],[1.0,4.08],[1.4,4.17],[2.0,4.31]],
+    },
+    // ★ 实物套件（据 2026-09-29 实物照片抄录标签）：Aesthesia 纤维丝 20 档。
+    //   ⚠ 手柄号是**厂商标定值**，不等于 log10(力值mg×10)：
+    //     0.008 g → 公式 1.903，标签 1.65；0.04 g → 公式 2.602，标签 2.44。
+    //     低档位偏差最大（约 0.25 log 单位 ≈ 一个档距），所以必须用标签值。
+    aesthesia20: {
+      label: 'Aesthesia 实物套装 0.008–300 g（20 档）',
+      defaultStart: 0.16,
+      pairs: [
+        [0.008,1.65,'g'],[0.02,2.36,'g'],[0.04,2.44,'g'],[0.07,2.83,'g'],
+        [0.16,3.22,'lb'],[0.4,3.61,'lb'],
+        [0.6,3.84,'p'],[1.0,4.08,'p'],[1.4,4.17,'p'],[2.0,4.31,'p'],
+        [4.0,4.56,'o'],[6.0,4.74,'o'],[8.0,4.93,'o'],[10.0,5.07,'o'],[15.0,5.18,'o'],
+        [26.0,5.46,'o'],[60.0,5.88,'o'],[100.0,6.10,'o'],[180.0,6.45,'o'],[300.0,6.65,'o'],
+      ],
+    },
+    // 旧 extended 保留，仅为兼容旧草稿（0.008–4.0 g，11 档）
+    extended: {
+      label: '（旧）扩展 0.008–4.0 g（11 档）',
+      defaultStart: 0.16,
+      pairs: [[0.008,1.65],[0.02,2.36],[0.04,2.44],[0.07,2.83],[0.16,3.22],[0.4,3.61],
+              [0.6,3.84],[1.0,4.08],[1.4,4.17],[2.0,4.31],[4.0,4.56]],
+    },
+  },
+  // 平铺列表（实际数据 / 校验 / 导出都按这个走）
+  timepoints: [
+    { key: 'pre',   label: '造模前',     group: null, hours: null },
+    { key: 'model', label: '造模后',     group: null, hours: null },
+    { key: 'h0.5',  label: '药效0.5h',  group: 'drug-effect', hours: 0.5 },
+    { key: 'h1',    label: '药效1h',    group: 'drug-effect', hours: 1 },
+    { key: 'h2.5',  label: '药效2.5h',  group: 'drug-effect', hours: 2.5 },
+    { key: 'h2',    label: '药效2h',    group: 'drug-effect', hours: 2 },
+    { key: 'h3',    label: '药效3h',    group: 'drug-effect', hours: 3 },
+    { key: 'h3.5',  label: '药效3.5h',  group: 'drug-effect', hours: 3.5 },
+    { key: 'h4',    label: '药效4h',    group: 'drug-effect', hours: 4 },
+  ],
+  // 分组（用于表头"给药后药效"横跨；group=null 的 tp 视为独立列）
+  timepointGroups: [
+    { key: 'drug-effect', label: '给药后', children: ['h0.5', 'h1', 'h2', 'h2.5', 'h3', 'h3.5', 'h4'] },
+  ],
+  metrics: [
+    { key: 'seq',        label: 'O/X 序列',    type: 'text',   required: true,
+      hard: { kind: 'seq' },  soft: null,
+      hint: '小写字母 o / x，至少 6 位，首转折起取 6 位查 k' },
+    { key: 'startForce', label: '起点力值',    type: 'number', unit: 'g', decimals: 2,
+      required: true,
+      hard: [0.07, 2.0],       soft: [0.16, 1.0],
+      hint: '必填；实际可用范围见①节「纤维丝套件」，留空时按「起点力值默认」计算' },
+    { key: 'pwt',        label: '50% PWT（派生）', type: 'number', unit: 'g', decimals: 3,
+      required: true, source: 'derived',
+      hard: [0, 60],           soft: [0.04, 4.0],
+      hint: '由 seq + startForce 按 up-down 推导 trials，再 MLE 计算；与 k 查表法互证' },
+  ],
+  crossRules: [
+    { id: 'seq-trans', label: '序列须有 OX/XO 转折',
+      test: ({seq}) => {
+        const s = (seq||'').toUpperCase().replace(/[^OX]/g,'');
+        if (!s || s.length < 6) return null;
+        for (let i = 0; i < s.length-1; i++) if (s[i] !== s[i+1]) return null;
+        return '整条序列无 OX/XO 转折，无法用 k 查表法。确认是真实数据后再继续。';
+      }},
+    { id: 'pwt-trend', label: '造模后 PWT 应 ≤ 造模前 1.2 倍',
+      test: ({pwt_pre, pwt_model}) => {
+        if (pwt_pre == null || pwt_model == null) return null;
+        if (pwt_model > pwt_pre * 1.2)
+          return `造模后 PWT (${pwt_model.toFixed(2)} g) 反而高于造模前 (${pwt_pre.toFixed(2)} g) 1.2 倍以上，确认造模是否生效。`;
+        return null;
+      }},
+    { id: 'pwt-treat', label: '非溶剂组给药后 PWT 应回升 ≥ 0.8 倍造模后',
+      test: ({pwt_model, pwt_drug, pwt_drug_label, group}) => {
+        if (pwt_model == null || pwt_drug == null) return null;
+        if (group === '溶剂' || group === 'vehicle') return null;
+        if (pwt_drug < pwt_model * 0.8)
+          return `${group} 组 ${pwt_drug_label} PWT (${pwt_drug.toFixed(2)} g) 低于造模后 (${pwt_model.toFixed(2)} g) ×0.8，确认给药是否生效。`;
+        return null;
+      }},
+  ],
+};
+
+/* 由 KIT_PAIRS 派生运行时套件对象：fibers / LOGS / colors 只此一份来源 */
+function makeKit(def){
+  const fibers = def.pairs.map(x => x[0]);
+  const LOGS = {}; const colors = {};
+  for (const x of def.pairs){ LOGS[x[0]] = x[1]; if (x[2]) colors[x[0]] = x[2]; }
+  return {
+    label: def.label, fibers, LOGS,
+    colors: Object.keys(colors).length ? colors : undefined,
+    defaultStart: def.defaultStart, pwtUnit: 'g',
+  };
+}
+SCHEMA.KIT = {};
+for (const k of Object.keys(SCHEMA.KIT_PAIRS)) SCHEMA.KIT[k] = makeKit(SCHEMA.KIT_PAIRS[k]);
+// 启动时自检：每个套件的 fibers 与 LOGS 必须严格同长同序
+for (const k of Object.keys(SCHEMA.KIT)){
+  const K = SCHEMA.KIT[k];
+  const bad = K.fibers.filter(f => K.LOGS[f] === undefined);
+  if (bad.length) throw new Error(`套件 ${k} 缺手柄号: ${bad.join(',')}`);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ *  2. 算法 —— PWT (MLE + k 查表法)
+ * ══════════════════════════════════════════════════════════════════════════ */
+function erf(x){
+  const a1=0.254829592,a2=-0.284496736,a3=1.421413741,a4=-1.453152027,a5=1.061405429,p=0.3275911;
+  const sign = x<0?-1:1; x=Math.abs(x);
+  const t=1/(1+p*x);
+  const y=1-(((((a5*t+a4)*t)+a3)*t+a2)*t+a1)*t*Math.exp(-x*x);
+  return sign*y;
+}
+const normCdf = x => 0.5*(1+erf(x/Math.SQRT2));
+
+function pwtMLE(trials, logs, sigma){
+  if (!trials.length) return null;
+  const xs = trials.map(t => logs[t[0]]);
+  const os = trials.map(t => t[1].toUpperCase()==='O');
+  const minX = Math.min(...xs), maxX = Math.max(...xs);
+  const lo = minX-1, hi = maxX+1;
+  function nll(mu){
+    let s=0;
+    for (let i=0;i<xs.length;i++){
+      const p = os[i] ? normCdf((mu-xs[i])/sigma) : normCdf((xs[i]-mu)/sigma);
+      s -= Math.log(Math.max(p, 1e-12));
+    }
+    return s;
+  }
+  const gr=(Math.sqrt(5)+1)/2;
+  let a=lo,b=hi,c=b-(b-a)/gr,d=a+(b-a)/gr;
+  for (let i=0;i<80;i++){ if(nll(c)<nll(d)) b=d; else a=c; c=b-(b-a)/gr; d=a+(b-a)/gr; if(Math.abs(b-a)<1e-7) break; }
+  return { pwt: Math.pow(10,(a+b)/2)/10000, mu:(a+b)/2 };
+}
+
+const K_RAW = {"OX":-0.5,"XO":0.5,"OOX":-0.378,"XXO":0.378,"OOOX":-0.377,"XXXO":0.377,
+  "OXO":0.842,"XOX":-0.842,"OOXO":0.89,"XXOX":-0.89,"OOOXO":0.894,"XXXOX":-0.894,
+  "OOOOXO":0.894,"XXXXOX":-0.894,"OXX":-0.178,"XOO":0.178,"OOXX":0.0,"XXOO":0.0,
+  "OOOXX":0.026,"XXXOO":-0.026,"OOOOXX":0.028,"XXXXOO":-0.028,
+  "OXOO":0.299,"XOXX":-0.299,"OOXOO":0.314,"XXOXX":-0.314,"OOOXOO":0.315,"XXXOXX":-0.315,
+  "OOOOXOO":0.315,"XXXXOXX":-0.315,"OXOX":-0.5,"XOXO":0.5,"OOXOX":-0.439,"XXOXO":0.439,
+  "OOOXOX":-0.432,"XXXOXO":0.432,"OOOOXOX":-0.432,"XXXXOXO":0.432,
+  "OXXO":1.0,"XOOX":-1.0,"OOXXO":1.122,"XXOOX":-1.122,"OOOXXO":1.139,"XXXOOX":-1.139,
+  "OOOOXXO":1.14,"XXXXOOX":-1.14,"OXXX":0.194,"XOOO":-0.194,"OOXXX":0.449,"XXOOO":-0.449,
+  "OOOXXX":0.5,"XXXOOO":-0.5,"OOOOXXX":0.506,"XXXXOOO":-0.506,
+  "OXOOO":-0.157,"XOXXX":0.157,"OOXOOO":-0.154,"XXOXXX":0.154,"OOOXOOO":-0.154,"XXXOXXX":0.154,
+  "OOOOXOOO":-0.154,
+  "OXOOX":-0.878,"XOXXO":0.878,"OOXOOX":-0.861,"XXOXXO":0.861,"OOOXOOX":-0.86,"XXXOXXO":0.86,
+  "OOOOXOOX":-0.86,"XXXXOXXO":0.86,"OXOXO":0.701,"XOXOX":-0.701,"OOXOXO":0.737,"XXOXOX":-0.737,
+  "OOOXOXO":0.741,"XXXOXOX":-0.741,"OOOOXOXO":0.741,"XXXXOXOX":-0.741,
+  "OXOXX":0.084,"XOXOO":-0.084,"OOXOXX":0.169,"XXOXOO":-0.169,"OOOXOXX":0.181,"XXXOXOO":-0.181,
+  "OOOOXOXX":0.182,"XXXXOXOO":-0.182,"OXXOO":0.305,"XOOXX":-0.305,"OOXXOO":0.372,"XXOOXX":-0.372,
+  "OOOXXOO":0.38,"XXXOOXX":-0.38,"OOOOXXOO":0.381,"XXXXOOXX":-0.381,
+  "OXXOX":-0.305,"XOOXO":0.305,"OOXXOX":-0.169,"XXOOXO":0.169,"OOOXXOX":-0.144,"XXXOOXO":0.144,
+  "OOOOXXOX":-0.142,"XXXXOOXO":0.142,
+  "OXXXO":1.288,"XOOOX":-1.288,"OOXXXO":1.5,"XXOOOX":-1.5,"OOOXXXO":1.544,"XXXOOOX":-1.544,
+  "OOOOXXXO":1.549,"XXXXOOOX":-1.549,
+  "OXXXX":0.555,"XOOOO":-0.555,"OOXXXX":0.897,"XXOOOO":-0.897,"OOOXXXX":0.985,"XXXOOOO":-0.985,   // 反对称：mirror(OOOXXXX)=XXXOOOO，必须取负
+  "OOOOXXXX":1.0,"XXXXOOOO":-1.0,
+  "OXOOOO":-0.547,"XOXXXX":0.547,"OOXOOOO":-0.547,"XXOXXXX":0.547,"OOOXOOOO":-0.547,"XXXOXXXX":0.547,
+  "OOOOXOOOO":-0.547,"XXXXXOXOX":-0.547,
+  "OOXXOXOX":0.022,"OOOXXOXOX":0.039,"OOOOXXOXOX":0.04,
+  "OXOXOX":-0.458,"OOXOXOX":-0.453,"OOOXOXOX":-0.453,"OOOOXOXOX":-0.453,
+  "OXXOXX":1.169,"OOXXOXX":1.237,"OOOXXOXX":1.247,"OOOOXXOXX":1.248,
+  "OXXXXO":0.611,"OOXXXXO":0.732,"OOOXXXXO":0.756,"OOOOXXXXO":0.758,
+  "OXXOOO":-0.296,"OOXXOOO":-0.266,"OOOXXOOO":-0.263,"OOOOXXOOO":-0.263,
+  "OXXOOX":-0.831,"OOXXOOX":-0.763,"OOOXXOOX":-0.753,"OOOOXXOOX":-0.752,
+  "OXXOXO":0.831,"OOXXOXO":0.935,"OOOXXOXO":0.952,"OOOOXXOXO":0.954,
+  "OXXXOO":0.296,"OOXXXOO":0.463,"OOOXXXOO":0.5,"OOOOXXXOO":0.504,
+  "OXXXOX":0.648,"OOXXXOX":0.678,"OOOXXXOX":0.681,
+  "OXXXXX":0.244,"OOXXXXX":0.252,"OXXXXXO":1.603,"OOXXXXXO":1.917,"OOOXXXXXO":2.0,"OOOOXXXXXO":2.014,
+  "OXXXXXX":0.893,"OOXXXXXX":1.329,"OOOXXXXXX":1.465,"OOOOXXXXXX":1.496};
+const K_TABLE = {};
+for (const [k,v] of Object.entries(K_RAW)) K_TABLE[k]=v;
+for (const [k,v] of Object.entries({...K_TABLE})){
+  const mir = k.replace(/O/g,'T').replace(/X/g,'O').replace(/T/g,'X');
+  if (!(mir in K_TABLE)) K_TABLE[mir]=-v;
+}
+function kLookup(seq){
+  const s = seq.toUpperCase();
+  for (let i=0;i<s.length-1;i++){
+    if (s[i] !== s[i+1]){
+      const pat = s.slice(i, i+6);
+      if (pat.length < 6) return null;
+      return K_TABLE[pat] ?? null;
+    }
+  }
+  return null;
+}
+function pwtK(seq, lastG, logs, sigma){
+  const k = kLookup(seq);
+  if (k === null) return null;
+  return Math.pow(10, logs[lastG] + k*sigma) / 10000;
+}
+
+/* ── 起点 ⇄ 末次 力值换算 ──
+   血泪教训：本面板记录的是**起点**力值，但网站（DTU von Frey app，Christensen 2020）
+   要的是**末次**力值（Final Filament = 序列最后一个反应所在的力值），并据此倒推。
+   网站输入必须使用最后一次实际施加的力值。
+   两者是同一套 up-down 规则的两种锚点，可以互相换算。 */
+
+/* 由 起点 + 序列 正推每一步力值，返回力值数组 */
+/* ★ P2-3：up-down 阶梯的唯一实现。
+   以前 forceTrace / traceClamped / startForceFromFinal / parseTrials 各写一遍遍历，
+   改一处漏三处就会出现"显示与计算不一致"。现在统一走这里，方向由 param 决定：
+     'fwd' 正推（起点 → 末次）｜ 'bwd' 倒推（末次 → 起点）｜ 'clamp' 只判是否夹紧
+   夹紧策略统一为：越界时停住不动（min/max 夹紧）。 */
+function walkUpDown(seq, startF, kit, mode){
+  const s = String(seq||'').toUpperCase().replace(/[^OX]/g,'');
+  const out = [];
+  if (!s) return out;
+  let i = kit.indexOf(Number(startF));
+  if (i < 0) i = kit.indexOf(defaultStartForce());
+  if (i < 0) i = 0;
+  if (mode === 'clamp'){
+    // 只回答"过程中有没有想走却走不动"
+    for (let k = 1; k <= s.length; k++){
+      if (k === s.length) break;                 // 最后一个反应不产生移动
+      const want = (s[k-1] === 'O') ? i+1 : i-1;
+      const got = Math.max(0, Math.min(kit.length-1, want));
+      if (got !== want) return true;
+      i = got;
+    }
+    return false;
+  }
+  if (mode === 'bwd'){
+    // 末次力值在最后一位，倒着走回起点
+    out.push(kit[i]);
+    for (let k = s.length-1; k > 0; k--){
+      i = (s[k-1] === 'O') ? Math.max(0, i-1) : Math.min(kit.length-1, i+1);
+      out.push(kit[i]);
+    }
+    out.reverse();                                  // 变成起点 → 末次 顺序
+    return out;
+  }
+  // fwd（默认）
+  out.push(kit[i]);
+  for (let k = 1; k < s.length; k++){
+    if (s[k-1] === 'O') i = Math.min(kit.length-1, i+1);
+    else i = Math.max(0, i-1);
+    out.push(kit[i]);
+  }
+  return out;
+}
+function forceTrace(seq, startF, kit){ return walkUpDown(seq, startF, kit, 'fwd'); }
+/* 末次力值 = 网站 CSV 的 Final Filament */
+function finalForceOf(seq, startF, kit){
+  const tr = forceTrace(seq, startF, kit);
+  return tr.length ? tr[tr.length-1] : null;
+}
+/* 序列是否在边界被夹紧（力值卡在最低/最高档）。
+   夹紧会让"起点→末次"不可逆：网站只拿到末次，重建出的是**另一条**无夹紧的链，
+   trials 与面板不同。所以夹紧要提醒用户。 */
+function traceClamped(seq, startF, kit){
+  // ★ P1-4 / P2-3：统一走 walkUpDown，兜底与实际走位必然一致
+  return walkUpDown(seq, startF, kit, 'clamp') === true;
+}
+/* 边界结果（无转折时取末次力值）。
+   官网原始表述是区间（">x" / "x<"），本项目最终口径改为**取末次力值的具体值**：
+     连续 xxxxx → 最后一个 x 所在力值（最低达档）；连续 ooooo → 最后一个 o 所在力值。
+   即复用 finalForceOf —— 与升-降规则天然一致，且不是套件绝对端点
+   （起点更高或序列更短时，末次未必到达 kit[0] / kit[last]）。
+   统计上仍属**删失观测**，导出时标 censored（见 toCsv）。 */
+function boundaryOutcome(seq, startF, kit){
+  const s = String(seq||'').toUpperCase().replace(/[^OX]/g,'');
+  if (!s) return null;
+  // 判据：整条序列无转折（全 X 或全 O）
+  const hasTurn = /OX|XO/.test(s);
+  if (hasTurn) return null;
+  const allX = s.split('').every(c => c === 'X');
+  const allO = s.split('').every(c => c === 'O');
+  if (!allX && !allO) return null;
+  // ★ 用户规则（2026-09-29）：取**最后一个反应的力值**（末次力值），不是套件绝对最低/最高档。
+  //   连续 xxxxx → 最后一个 x 所在的力值（升-降规则一路下降到的最低档）；
+  //   连续 ooooo → 最后一个 o 所在的力值（一路上升到的最高档）。
+  //   这正是"末次力值" finalForceOf —— 与升-降规则天然一致。
+  //   之前误用 kit[0]/kit[MAX]：起点更高或序列更短时，末次力值未必到达套件端点。
+  const final = finalForceOf(s, startF, kit);
+  if (final == null) return null;
+  return allX
+    ? { kind:'min', value: final, text: String(final),
+        why:`连续 ${s.length} 次 X（全缩足）无转折 → 取最后一个 x 的力值 ${final} g（最低）` }
+    : { kind:'max', value: final, text: String(final),
+        why:`连续 ${s.length} 次 O（全无反应）无转折 → 取最后一个 o 的力值 ${final} g（最高）` };
+}
+/* 由 末次 + 序列 倒推起点力值（导入网站 CSV 时用） */
+function startForceFromFinal(seq, finalF, kit){
+  // ★ P2-3：倒推逻辑并入 walkUpDown('bwd')，返回链首（= 起点）
+  if (!String(seq||'')) return null;
+  if (kit.indexOf(Number(finalF)) < 0) return null;    // 末次不在套件内 → 不猜
+  const tr = walkUpDown(seq, finalF, kit, 'bwd');
+  return tr.length ? tr[0] : null;
+}
+
+function parseTrials(seq, startG, kit){
+  const s = (seq||'').toUpperCase().replace(/[^OX]/g,'');
+  if (!s) return [];
+  const out = [];
+  let idx = kit.indexOf(+startG);
+  if (idx < 0) idx = kit.indexOf(defaultStartForce());
+  if (idx < 0) idx = 0;
+  out.push([kit[idx], s[0]]);
+  for (let i=1;i<s.length;i++){
+    const prev = out[i-1][1];
+    if (prev==='X') idx = Math.max(0, idx-1);
+    else if (prev==='O') idx = Math.min(kit.length-1, idx+1);
+    out.push([kit[idx], s[i]]);
+  }
+  return out;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ *  3. 状态 + 持久化 + 审计
+ * ══════════════════════════════════════════════════════════════════════════ */
+const LS_KEY  = 'vonfrey-public-workflow::draft-v1';
+const LS_META = 'vonfrey-public-workflow::draft-meta-v1';
+const MAX_UNDO = 30;
+
+let state = null;
+let undoStack = [];
+let dirty = false;
+let saveTimer = null;
+let storageBroken = false;
+const pending = {};
+let lastSnapKey = null, lastSnapAt = 0;
+
+function defaultState(){
+  return {
+    meta: { protocol:'', operator:'', device:'', date:'', notes:'', kit:'aesthesia20', allowOverride:'off', idPrefix:'', defaultStart:0.16 },
+    tpOrder: null,      // 时间点显示顺序（key 数组）；null = 用 SCHEMA 默认顺序
+    timepointTimes: {}, // 实测钟点 {tpKey: 'HH:MM'} —— 用于计算真实测试频率（P0-4/P0-5）
+    subjects: [],
+    cells: {},
+    audit: [],
+    webImports: {},   // cellKey('SUB|TP|pwt') → { kValue, delta, threshold, importedAt, id }
+    webArchive: null, // { csv, at, n } —— 网站原始 CSV 全文；Downloads 里的文件丢了也还有
+    finalized: false,
+  };
+}
+
+function cellKey(s, t, m){ return s+'|'+t+'|'+m; }
+/* 动物编号必须唯一：state.cells 的 key 是 `${id}|${tp}|${metric}`，
+   两个鼠同名会让它们的 cells 静默互相覆盖 —— 这是最危险的一类数据丢失，
+   因为界面完全看不出异常。 */
+function dupSubjectIds(){
+  const seen = new Map();
+  const dups = new Set();
+  for (const s of state.subjects){
+    const id = String(s.id || '');
+    if (!id) continue;
+    if (seen.has(id)) dups.add(id); else seen.set(id, true);
+  }
+  return [...dups];
+}
+function subjectIdTaken(id, exceptIdx){
+  return state.subjects.some((s, i) => i !== exceptIdx && String(s.id) === String(id));
+}
+/* ★ P2-1：动物编号是存储模型 `id|tp|metric` 的第一段，**绝不能含分隔符 `|`**。
+   含了会导致：
+     · getCell(...key.split('|')) 参数错位 → 静默写到别的 key
+     · migrateOrphanTimepoints 把 parts[1] 当时间点 → 凭空造出幽灵列
+   同时禁掉会破坏 CSV/文件名/ID 编码约定的字符。 */
+function subjectIdProblem(id){
+  const v = String(id == null ? '' : id).trim();
+  if (!v) return '不能为空';
+  if (v.length > 40) return '过长（最多 40 字符）';
+  if (v.indexOf('|') >= 0) return '不能含竖线「|」（它是内部数据键的分隔符）';
+  if (/[,\n\r]/.test(v)) return '不能含逗号或换行（会破坏 CSV 导出）';
+  return null;
+}
+/* 宽松查已有动物：先精确匹配，再忽略大小写匹配。
+   外部数据（网站 CSV、Excel 粘贴）常把 demo-001 / DEMO-001 混用，
+   若当成两只鼠，分析阶段就会凭空多出一组样本。 */
+function findSubjectLoose(id){
+  const s = String(id == null ? '' : id);
+  const exact = state.subjects.find(x => x.id === s);
+  if (exact) return exact;
+  const low = s.toLowerCase();
+  return state.subjects.find(x => String(x.id).toLowerCase() === low) || null;
+}
+function getCell(s, t, m){
+  const k = cellKey(s, t, m);
+  if (!state.cells[k]) state.cells[k] = { v:'', reason:'', ack:false, at:null, by:null };
+  return state.cells[k];
+}
+function findCell(k){ return state.cells[k] || { v:'', reason:'', ack:false }; }
+
+function currentKit(){
+  return SCHEMA.KIT[state.meta.kit] || SCHEMA.KIT.standard;
+}
+
+/* 起点力值的唯一真源。
+   背景（血泪）：界面下拉框显示的是 state.meta.defaultStart（0.16），
+   但计算/导出曾用 currentKit().defaultStart（extended 套件是 0.4）——
+   于是"看到 0.16、算成 0.4"，导出到网站 CSV 的 Final Filament 也是 0.4，
+   PWT 平均偏 56%（最大 80%）。凡是要"起点默认值"的地方，一律走这里。 */
+function defaultStartForce(){
+  const meta = state.meta && state.meta.defaultStart;
+  if (meta != null && num(meta) !== null) return num(meta);
+  return 0.16;
+}
+/* 单元格的起点力值：填了就用填的，没填用 defaultStartForce（与界面显示一致） */
+function effectiveStart(sfRaw){
+  const n = num(sfRaw);
+  return n !== null ? n : defaultStartForce();
+}
+
+function num(v){
+  if (v === null || v === undefined) return null;
+  const s = String(v).trim();
+  if (s === '') return null;
+  if (!/^[+-]?(\d+(\.\d*)?|\.\d+)([eE][+-]?\d+)?$/.test(s)) return null;
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+}
+
+function getSeq(s, tp){
+  const c = findCell(cellKey(s, tp, 'seq'));
+  return String(c.v || '').toUpperCase().replace(/[^OX]/g,'');
+}
+function getStart(s, tp){
+  const c = findCell(cellKey(s, tp, 'startForce'));
+  return effectiveStart(c.v);
+}
+function getTrials(s, tp){
+  return parseTrials(getSeq(s,tp), getStart(s,tp), currentKit().fibers);
+}
+/* 统一解包 getPwt 的返回值。
+   历史问题：getPwt 有两种返回（覆盖时裸 number、MLE 时 {pwt,mu}），
+   消费方若只写 `typeof === 'object'` 分支，number 分支会静默变成 undefined，
+   导致跨字段校验/对照表对"覆盖值"永久失效。这里收口成一个函数，全文件统一用。 */
+function pwtValue(pwtObj){
+  if (pwtObj == null) return null;
+  if (typeof pwtObj === 'number') return pwtObj;
+  if (typeof pwtObj === 'object' && typeof pwtObj.pwt === 'number') return pwtObj.pwt;
+  return null;
+}
+function pwtMu(pwtObj){
+  return (pwtObj && typeof pwtObj === 'object') ? pwtObj.mu : null;
+}
+function calcPwt(s, tp){ return pwtValue(getPwt(s, tp)); }   // 便捷别名（注意：与上面的解包器不同名）
+
+function getPwt(s, tp){
+  const ovc = findCell(cellKey(s, tp, 'pwt'));
+  const ov = num(ovc.v);
+  if (ov !== null && state.meta.allowOverride === 'on' && ovc.override) return ov;
+  const trials = getTrials(s, tp);
+  if (!trials.length) return null;
+  const kit = currentKit();
+  const sigma = (kit.LOGS[kit.fibers[kit.fibers.length-1]] - kit.LOGS[kit.fibers[0]]) / (kit.fibers.length-1);
+  return pwtMLE(trials, kit.LOGS, sigma);
+}
+
+/* 校验（单一真源） */
+function validateCell(s, tp, mk){
+  const m = SCHEMA.metrics.find(x => x.key === mk);
+  if (!m) return { level:'ok', code:'ok', msg:'' };
+  const c = findCell(cellKey(s, tp, mk));
+  const raw = String(c.v ?? '').trim();
+  if (raw === ''){
+    if (!m.required) return { level:'empty', code:'empty', msg:'' };
+    // startForce 的范围随套件变，不能写死（曾写死「0.07–2.0 g」误导 20 档用户）
+    let hint = m.hint || '';
+    if (mk === 'startForce'){
+      const kt = currentKit();
+      const lo = kt.fibers[0], hi = kt.fibers[kt.fibers.length-1];
+      hint = `${lo}–${hi} g（${kt.fibers.length} 档）；默认 ${defaultStartForce()} g`;
+    }
+    return { level:'missing', code:'required', msg:`必填项未录入。${hint?('（'+hint+'）'):''}` };
+  }
+
+  if (mk === 'seq'){
+    if (!/^[oxOX]+$/.test(raw))
+      return { level:'bad', code:'format', msg:`只能输入 o / x 字母（小写也行），不能含数字、空格或其他字符。当前是「${raw}」。` };
+    // NINDS/Chaplan 规范：总反应数 4–9 个（不是"必须 ≥6"）。
+    //   <4  : 不足最低要求 → 硬错误
+    //   4–5 : MLE 可算；k 查表法需要"首次转折起 6 位"，此时取不到 → 软提示
+    //   ≥6  : 两法都可用
+    const s = raw.toUpperCase();
+    if (s.length < 4)
+      return { level:'bad', code:'short', msg:`序列仅 ${s.length} 位。up-down 法至少要 4 个反应（NINDS/Chaplan 规范：4–9 个）。` };
+    if (s.length < 6)
+      return { level:'warn', code:'k-unavailable', msg:`${s.length} 位：MLE 能算，但 k 查表法需要"首次转折起 6 位"，本次取不到（这是规范允许的短序列，不是错误）。` };
+    return { level:'ok', code:'ok', msg:'' };
+  }
+  if (mk === 'startForce'){
+    const n = num(raw);
+    if (n === null) return { level:'bad', code:'format', msg:`只能填数字。当前是「${raw}」。` };
+    const kit = currentKit();
+    if (!(n in kit.LOGS))
+      return { level:'bad', code:'hard', msg:`力值 ${n} 不在纤维丝套件内（${kit.fibers.join(', ')} g）。请核对。` };
+    return { level:'ok', code:'ok', msg:'' };
+  }
+  if (mk === 'pwt'){
+    const seqC = findCell(cellKey(s, tp, 'seq'));
+    const sfC = findCell(cellKey(s, tp, 'startForce'));
+    if (!String(seqC.v).trim() || !String(sfC.v).trim()){
+      return { level:'missing', code:'derived-dep', msg:`派生值，须先填序列与起点力值。` };
+    }
+    const n = num(raw);
+    if (n === null) return { level:'bad', code:'format', msg:`只能填数字。当前是「${raw}」。` };
+    if (m.hard && (n < m.hard[0] || n > m.hard[1]))
+      return { level:'bad', code:'hard', msg:`超出允许范围 ${m.hard[0]}–${m.hard[1]} ${m.unit}（当前 ${n}）。请核对设备读数与单位。` };
+    if (m.soft && (n < m.soft[0] || n > m.soft[1])){
+      const acknowledged = c.ack && String(c.reason || '').trim().length >= 4;
+      return acknowledged
+        ? { level:'ok', code:'soft-acked', msg:`超出常规范围，已记录理由：${c.reason}` }
+        : { level:'warn', code:'soft', msg:`超出常规范围 ${m.soft[0]}–${m.soft[1]} ${m.unit}（当前 ${n}）。若确为真实结果，请在下方面板填写理由并勾"已复核"。` };
+    }
+    return { level:'ok', code:'ok', msg:'' };
+  }
+  return { level:'ok', code:'ok', msg:'' };
+}
+
+function cellClass(level){
+  return level==='bad'?'bad':level==='warn'?'warn':level==='missing'?'miss':level==='ok'?'ok':'';
+}
+function cellMark(level){
+  return level==='bad'?'!':level==='warn'?'△':level==='missing'?'–':level==='ok'?'✓':'';
+}
+function needsBubble(level){ return level==='bad' || level==='warn'; }
+
+function softIssues(){
+  const out = [];
+  for (const s of state.subjects) for (const tp of tpSeq()) for (const m of SCHEMA.metrics){
+    if (!m.soft) continue;
+    const k = cellKey(s.id, tp.key, m.key);
+    const c = findCell(k);
+    const n = m.type === 'number' ? num(c.v) : null;
+    if (n === null) continue;
+    if (n >= m.soft[0] && n <= m.soft[1]) continue;
+    if (m.hard && (n < m.hard[0] || n > m.hard[1])) continue;
+    const reason = String(c.reason || '').trim();
+    out.push({ key:k, sub:s.id, tp:tp.key, mk:m.key, metric:m, val:n,
+               ack: !!c.ack, reason: c.reason || '',
+               resolved: !!c.ack && reason.length >= 4 });
+  }
+  return out;
+}
+function crossIssues(){
+  const out = [];
+  for (const s of state.subjects){
+    const seqs = {};
+    for (const tp of tpSeq()){
+      // ★ P1-10：删失格（全 X / 全 O，无转折）不能把 MLE 点估计喂进跨字段规则 ——
+      //   全 X 序列的 NLL 对 mu 单调，pwtMLE 会收敛到上界返回一个「虚高但合法」的数，
+      //   拿它和造模前比会输出一条假的"造模没生效"警报。故此处显式置 null。
+      const sq = String(getSeq(s.id, tp.key) || '').toUpperCase().replace(/[^OX]/g,'');
+      const censored = sq !== '' && !/OX|XO/.test(sq);
+      seqs[tp.key] = {
+        seq: sq,
+        pwt: getPwt(s.id, tp.key),
+        pwtNum: censored ? null : pwtValue(getPwt(s.id, tp.key)),   // 删失格不参与
+        censored,
+        label: tp.label,
+      };
+    }
+    const pre = seqs.pre;
+    const model = seqs.model;
+    // 找第一个有 PWT 值的 drug-effect 子时间点（跳过删失格）
+    const drugTp = SCHEMA.timepointGroups.flatMap(g => kidsOf(g.key))
+      .find(t => seqs[t.key] && seqs[t.key].pwtNum != null);
+    const ctx = {
+      seq: (pre && pre.seq) || (model && model.seq) || '',
+      pwt_pre: pre ? pre.pwtNum : null,
+      pwt_model: model ? model.pwtNum : null,
+      pwt_drug: drugTp ? seqs[drugTp.key].pwtNum : null,
+      pwt_drug_label: drugTp ? drugTp.label : '',
+      group: s.grp,
+    };
+    for (const r of SCHEMA.crossRules){
+      const m = r.test(ctx);
+      if (m) out.push({ label:`${s.id}（${s.grp||'未分组'}）`, rule:r.label, msg:m });
+    }
+  }
+  return out;
+}
+
+/* ── 编辑合并（多次按键 → 一次审计）── */
+function markPending(key, prev, val){
+  if (!(key in pending)) pending[key] = { from: prev, to: val };
+  else pending[key].to = val;
+}
+function commitPending(key){
+  const p = pending[key];
+  if (!p) return false;
+  delete pending[key];
+  if (String(p.from) === String(p.to)) return false;
+  audit('edit', key, p.from, p.to, '');
+  return true;
+}
+function flushPending(){
+  let n = 0;
+  for (const k in pending) if (commitPending(k)) n++;
+  return n;
+}
+function snapshotFor(key){
+  const now = Date.now();
+  if (key !== lastSnapKey || now - lastSnapAt > 2500){ snapshot(); lastSnapKey = key; }
+  lastSnapAt = now;
+}
+
+/* ── 撤销 ── */
+function snapshot(){
+  flushPending();
+  undoStack.push(JSON.stringify(state));
+  if (undoStack.length > MAX_UNDO) undoStack.shift();
+  document.getElementById('btnUndo').disabled = false;
+}
+function undo(){
+  if (!undoStack.length) return;
+  const prev = JSON.parse(undoStack.pop());
+  const cur = state;
+  state = prev;
+  audit('undo', '全局', subset(cur), subset(state), '撤销上一步操作');
+  renderAll();
+  document.getElementById('btnUndo').disabled = undoStack.length === 0;
+  announce('已撤销上一步操作。');
+}
+function subset(s){
+  let n = 0; for (const k in s.cells) if (String(s.cells[k].v||'').trim() !== '') n++;
+  return `${s.subjects.length} 对象 / ${n} 个已填值`;
+}
+
+/* ── 审计（只追加）── */
+function audit(action, target, from, to, reason){
+  const op = (state.meta.operator || '').trim() || '(未填操作者)';
+  state.audit.push({
+    ts: new Date().toLocaleString('sv-SE'),
+    iso: new Date().toISOString(),
+    actor: op, action, target,
+    from: from === undefined ? '' : String(from),
+    to:   to   === undefined ? '' : String(to),
+    reason: reason || ''
+  });
+  renderAudit();
+}
+
+/* ── IndexedDB 持久层（替代 localStorage，更可靠）──
+   原因：file:// 下 localStorage 不持久（navigator.storage.persist() 返回 false），
+         浏览器在磁盘压力或某些条件下会清掉，用户无感知、代码也无能为力。
+         IndexedDB 在 file:// 下虽然也是 best-effort，但配额大得多（Chromium 可达磁盘 60%），
+         且异步不阻塞输入。两者同时写，IDB 优先读取，LS 做镜像兜底。 */
+const IDB_NAME = 'vonfrey-public-workflow';
+const IDB_VERSION = 1;
+const IDB_STORE = 'state';
+const IDB_KEY = 'current';
+
+function openIdb(){
+  return new Promise((resolve, reject) => {
+    if (!('indexedDB' in window)) return reject(new Error('no IndexedDB'));
+    const req = indexedDB.open(IDB_NAME, IDB_VERSION);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains(IDB_STORE)) db.createObjectStore(IDB_STORE);
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error || new Error('IDB open failed'));
+  });
+}
+async function idbPut(payload){
+  const db = await openIdb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, 'readwrite');
+    tx.objectStore(IDB_STORE).put(payload, IDB_KEY);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+}
+async function idbGet(){
+  try{
+    const db = await openIdb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, 'readonly');
+      const req = tx.objectStore(IDB_STORE).get(IDB_KEY);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => reject(req.error);
+    });
+  }catch(e){ return null; }
+}
+async function idbClear(){
+  try{
+    const db = await openIdb();
+    return new Promise((resolve) => {
+      const tx = db.transaction(IDB_STORE, 'readwrite');
+      tx.objectStore(IDB_STORE).delete(IDB_KEY);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+      tx.onabort = () => resolve();
+    });
+  }catch(e){}
+}
+/* 通用 IDB 键值：存"归档目录句柄"这类非草稿数据。
+   FileSystemHandle 支持结构化克隆，可以直接塞进 IndexedDB 跨会话保留。 */
+async function idbSetKey(key, value){
+  const db = await openIdb();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, 'readwrite');
+    tx.objectStore(IDB_STORE).put(value, key);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+    tx.onabort = () => reject(tx.error);
+  });
+}
+async function idbGetKey(key){
+  try{
+    const db = await openIdb();
+    return new Promise((resolve, reject) => {
+      const tx = db.transaction(IDB_STORE, 'readonly');
+      const req = tx.objectStore(IDB_STORE).get(key);
+      req.onsuccess = () => resolve(req.result || null);
+      req.onerror = () => reject(req.error);
+    });
+  }catch(e){ return null; }
+}
+
+/* 把草稿写回 state：跑孤儿时间点迁移、恢复数据、重渲染。
+   抽出来是为了让 init() 的自动恢复和「再确认一次」按钮走同一条路径。 */
+function applyDraft(parsed, opts){
+  opts = opts || {};
+  if (!parsed || !parsed.state) return false;
+  // ① 先跑 key 改名迁移（必须在孤儿迁移之前：h1.5 已不在 SCHEMA 里，
+  //    若不先搬走会被当成"孤儿时间点"打上废弃标记）
+  let renamed = 0; const renSkipped = [];
+  for (const [from, to] of TP_KEY_RENAMES){
+    if (SCHEMA.timepoints.some(t => t.key === from)) continue;  // SCHEMA 里已无此 key 才需要搬
+    const r = migrateTpKeyRename(parsed.state, from, to);
+    if (typeof r === 'number'){ renamed += r; }              // 兼容旧签名
+    else { renamed += r.moved; if (r.skipped) renSkipped.push(r); }
+  }
+  const mig = migrateOrphanTimepoints(parsed.state, parsed.tps || []);
+  state = parsed.state;
+  if (renamed){
+    const sk = renSkipped[0] || { skipped:0, skippedKeys:[] };
+    audit('migrate-tp-key', TP_KEY_RENAMES.map(x => x.join('→')).join(','),
+          '已录 cells（含网站导入值）', '已按新 key 归位',
+          sk.skipped
+            ? `迁移 ${renamed} 条，其中 ${sk.skipped} 条因新 key 已有数据而未覆盖，源数据保留在 ${sk.skippedKeys.join('、')}（请人工核对）`
+            : `迁移 ${renamed} 条记录，无冲突`);
+  }
+  if (mig.added.length){
+    for (const tp of mig.added) SCHEMA.timepoints.push(tp);
+    audit('migrate-orphans', mig.added.map(t => t.key).join(','),
+          mig.orphans.join(','),
+          mig.added.map(t => t.key + '(label: ' + t.label + ')').join(','),
+          `从 ${(parsed.tps || []).length} 时间点结构升级，添加已废弃时间点`);
+  }
+  // 注意：这里**不能**用 parsed.tps 整体覆盖 SCHEMA.timepoints —— 旧草稿里的 tp
+  // 没有 group 字段，覆盖后 timepointGroups.children 会指向不存在的 tp，
+  // renderHead 的分组表头就消失了。孤儿 tp 已由上面的迁移单独补回。
+  save(true);
+  renderAll();
+  return mig.added.length;
+}
+
+let idbBroken = false;
+function markSaved(){
+  const el = document.getElementById('savePill');
+  const t = new Date();
+  el.textContent = '✓ 自动备份 ' + String(t.getHours()).padStart(2,'0') + ':' +
+                   String(t.getMinutes()).padStart(2,'0') + ':' + String(t.getSeconds()).padStart(2,'0');
+  el.className = 'pill ok';
+}
+function markSaving(){
+  const el = document.getElementById('savePill');
+  el.textContent = '⏳ 备份中...';
+  el.className = 'pill info';
+}
+function markSaveFail(msg){
+  const el = document.getElementById('savePill');
+  el.textContent = '✗ ' + msg;
+  el.className = 'pill bad';
+}
+async function save(immediate){
+  if (storageBroken) return;
+  clearTimeout(saveTimer);
+  const doIt = async () => {
+    flushPending();
+    const payload = { savedAt: new Date().toISOString(), tps: SCHEMA.timepoints, state };
+    markSaving();
+    // 优先写 IndexedDB（更可靠）
+    if (!idbBroken){
+      try{
+        await idbPut(payload);
+        // 镜像写 localStorage（兜底；IDB 不可用时仍能恢复）
+        try { localStorage.setItem(LS_KEY, JSON.stringify(payload)); }catch(e){}
+        try { localStorage.setItem(LS_META, payload.savedAt); }catch(e){}
+        dirty = false; markSaved();
+        return;
+      }catch(e){
+        idbBroken = true;
+        // IDB 失败 → 回退 localStorage
+      }
+    }
+    // 回退路径
+    try{
+      localStorage.setItem(LS_KEY, JSON.stringify(payload));
+      localStorage.setItem(LS_META, payload.savedAt);
+      dirty = false; markSaved();
+    }catch(e){
+      storageBroken = true;
+      document.getElementById('bannerQuota').classList.add('show');
+      markSaveFail('存储已满，请立刻 ⑤ 节导出 JSON');
+      announce('自动备份失败，存储空间可能已满。');
+    }
+  };
+  if (immediate) await doIt();
+  else saveTimer = setTimeout(doIt, 400);
+}
+async function loadDraft(){
+  // 优先从 IDB 读，失败则回退 localStorage
+  try{
+    const fromIdb = await idbGet();
+    if (fromIdb && fromIdb.state) return fromIdb;
+  }catch(e){}
+  try{
+    const raw = localStorage.getItem(LS_KEY);
+    if (!raw) return null;
+    const p = JSON.parse(raw);
+    if (!p || !p.state) return null;
+    return p;
+  }catch(e){ return null; }
+}
+
+/* 时间点 key 改名迁移：把已录数据从旧 key 搬到新 key（改 SCHEMA 的 key 而不迁移会丢数据）。
+   本例：2026-09-29 用户确认「1.5h 这次没测，h1.5 槽位装的是 2.5h 数据」，
+        故 key h1.5 → h2.5。cells / webImports / tpOrder 三处都要搬。 */
+function migrateTpKeyRename(s, fromKey, toKey){
+  if (!s || !s.cells) return { moved:0, skipped:0, skippedKeys:[] };
+  let moved = 0, skipped = 0; const skippedKeys = [];
+  // ① cells:  "SUB|h1.5|metric" → "SUB|h2.5|metric"
+  for (const k of Object.keys(s.cells)){
+    const parts = k.split('|');
+    if (parts.length >= 3 && parts[1] === fromKey){
+      const nk = [parts[0], toKey, parts.slice(2).join('|')].join('|');
+      if (!(nk in s.cells)){ s.cells[nk] = s.cells[k]; delete s.cells[k]; moved++; }
+      else {
+        // ★ 目标 key 已有数据（用户可能已在新槽位重录过）。
+        //   绝不能删源 —— 那会静默丢数据。原实现无条件 delete 还把 moved++，
+        //   导致审计写出"数据未丢失"这句假话。
+        //   改为：源数据挪到 `nk#from:fromKey` 保留，并单独计数 skipped。
+        const keepKey = `${nk}#from:${fromKey}`;
+        s.cells[keepKey] = Object.assign({}, s.cells[k], { _migratedFrom:k, _migratedAt:new Date().toISOString() });
+        delete s.cells[k];
+        moved++; skipped++; skippedKeys.push(keepKey);
+      }
+    }
+  }
+  // ② webImports 同理
+  if (s.webImports){
+    for (const k of Object.keys(s.webImports)){
+      const parts = k.split('|');
+      if (parts.length >= 3 && parts[1] === fromKey){
+        const nk = [parts[0], toKey, parts.slice(2).join('|')].join('|');
+        if (!(nk in s.webImports)){ s.webImports[nk] = s.webImports[k]; delete s.webImports[k]; }
+        else {
+          const keepK = `${nk}#from:${fromKey}`;
+          s.webImports[keepK] = s.webImports[k]; delete s.webImports[k];
+          skipped++; skippedKeys.push(keepK);
+        }
+      }
+    }
+  }
+  // ③ tpOrder 里的 key
+  if (Array.isArray(s.tpOrder)){
+    s.tpOrder = s.tpOrder.map(k => (k === fromKey ? toKey : k));
+    // 去重（若目标 key 已在列表里）
+    s.tpOrder = s.tpOrder.filter((k, i, a) => a.indexOf(k) === i);
+  }
+  return { moved, skipped, skippedKeys };
+}
+/* 一次性改名清单（key 改名时在此登记，加载草稿时自动迁移已录数据） */
+const TP_KEY_RENAMES = [['h1.5', 'h2.5']];   // 2026-09-29: 1.5h 未测，h1.5 槽位实为 2.5h
+
+/* 迁移孤儿时间点：扫描 state.cells 找出 SCHEMA.timepoints 没有的 tp key，把它们加回 schema 并标记 deprecated。
+   背景：旧版 SCHEMA 是 [pre, model, post]；新版是 [pre, model, h0.5, h1, h1.5, h2, h3, h4]。
+   用户用旧版录入后，state.cells 里还有 M1|post|seq=...，但新 SCHEMA 没 post，渲染不显示——视感像丢数据。
+   这个迁移把 post 加回 SCHEMA 并标 deprecated，让旧数据可见、可编辑、可手动迁移到新子时间点。 */
+function migrateOrphanTimepoints(s, oldTps){
+  const currentKeys = new Set(SCHEMA.timepoints.map(t => t.key));
+  const orphanTpSet = new Set();
+  for (const k of Object.keys(s.cells || {})){
+    const parts = k.split('|');
+    if (parts.length < 3) continue;
+    const tp = parts[1];
+    if (!tp || currentKeys.has(tp)) continue;
+    orphanTpSet.add(tp);
+  }
+  const orphans = [...orphanTpSet];
+  const added = [];
+  for (const key of orphans){
+    if (SCHEMA.timepoints.some(t => t.key === key)) continue;
+    const oldTp = (oldTps || []).find(t => t.key === key);
+    const tp = {
+      key,
+      label: oldTp ? oldTp.label : key,
+      group: null,
+      deprecated: true,
+      deprecatedNote: `旧版时间点。已废弃，建议把数据复制到新 SCHEMA 里的子时间点（如 h0.5/h1/...）后删除此列。`,
+    };
+    added.push(tp);
+  }
+  return { orphans, added };
+}
+let _toastTimer = null;
+function announce(msg, isErr){
+  // ① 读屏区域（原有行为，保持不变）
+  const r = document.getElementById('liveRegion');
+  if (r){ r.textContent = ''; setTimeout(() => { r.textContent = msg; }, 30); }
+  // ② 可见提示条 —— 视觉用户必须看得到反馈，否则"点了像没反应"
+  const t = document.getElementById('toast');
+  if (!t || !msg) return;
+  t.textContent = msg;
+  t.classList.toggle('err', !!isErr);
+  t.hidden = false;
+  // 强制回流，保证连续两次相同文案也会重新动画
+  void t.offsetWidth;
+  t.classList.add('show');
+  clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => {
+    t.classList.remove('show');
+    setTimeout(() => { if (!t.classList.contains('show')) t.hidden = true; }, 220);
+  }, isErr ? 8000 : 4200);
+}
+
+function esc(s){
+  return String(s === null || s === undefined ? '' : s)
+    .replace(/&/g,'&').replace(/</g,'<').replace(/>/g,'>').replace(/"/g,'"');
+}
+function cssId(k){ return String(k).replace(/[^A-Za-z0-9_-]/g,'_'); }
+
+/* ══════════════════════════════════════════════════════════════════════════
+ *  4. 渲染
+ * ══════════════════════════════════════════════════════════════════════════ */
+function renderMeta(){
+  document.getElementById('m-protocol').value = state.meta.protocol || '';
+  document.getElementById('m-operator').value = state.meta.operator || '';
+  document.getElementById('m-device').value = state.meta.device || '';
+  document.getElementById('m-date').value = state.meta.date || '';
+  document.getElementById('m-notes').value = state.meta.notes || '';
+  document.getElementById('m-kit').value = state.meta.kit || 'standard';
+  document.getElementById('m-allowOverride').value = state.meta.allowOverride || 'off';
+  document.getElementById('m-idPrefix').value = state.meta.idPrefix || '';
+  const dsEl = document.getElementById('m-defaultStart');
+  if (dsEl) dsEl.value = String(defaultStartForce());
+  renderKitHint();
+  renderTpEditor();
+}
+
+/* ── 纤维丝序列一键复制 ────────────────────────────────
+   网站联动要在 Custom Steps 里填一条"力值列表"（逗号+空格分隔），
+   每次手打 20 个数字很烦，这里做成可复制模板。
+   格式与官网示例一致：0.008, 0.02, 0.04, 0.07, 0.16, 0.4, 0.6, 1.0, 2.0
+   （整数补 .0，如 1.0 / 300.0） */
+function fmtFilament(g){
+  const s = String(g);
+  return s.includes('.') ? s : s + '.0';
+}
+/* 当前套件的完整力值列表（模板） */
+function filamentListText(){
+  return currentKit().fibers.map(fmtFilament).join(', ');
+}
+/* 只保留数据里**实际用到**的档位（升-降规则走出来的每一步力值） */
+function usedFilamentListText(){
+  const kit = currentKit();
+  const used = new Set();
+  for (const s of state.subjects) for (const tp of tpSeq()){
+    const seq = String(getSeq(s.id, tp.key) || '').toUpperCase().replace(/[^OX]/g, '');
+    if (!seq) continue;
+    for (const g of forceTrace(seq, getStart(s.id, tp.key), kit.fibers)) used.add(g);
+  }
+  const list = kit.fibers.filter(g => used.has(g));
+  return list.length ? list.map(fmtFilament).join(', ') : '';
+}
+function refreshFilamentList(text){
+  const el = document.getElementById('filamentList');
+  if (!el) return;
+  if (typeof text === 'string'){ el.value = text; return; }
+  el.value = filamentListText();      // 默认显示全套
+}
+/* 复制到剪贴板。file:// 下 navigator.clipboard 常不可用（非 secure context），
+   故必须有 execCommand 回退，否则点了没反应。 */
+function copyTextToClipboard(text, okMsg){
+  const done = (ok) => announce(ok ? okMsg : '复制失败：请手动点进输入框，全选（⌘A）后复制（⌘C）。');
+  try{
+    if (navigator.clipboard && navigator.clipboard.writeText){
+      navigator.clipboard.writeText(text).then(() => done(true), () => fallback());
+      return;
+    }
+  }catch(e){}
+  fallback();
+  function fallback(){
+    try{
+      const ta = document.createElement('textarea');
+      ta.value = text;
+      ta.setAttribute('readonly','');
+      ta.style.position = 'fixed'; ta.style.top = '-1000px'; ta.style.opacity = '0';
+      document.body.appendChild(ta);
+      ta.select(); ta.setSelectionRange(0, ta.value.length);
+      const ok = document.execCommand('copy');
+      document.body.removeChild(ta);
+      if (ok) done(true);
+      else { const el = document.getElementById('filamentList'); if (el){ el.focus(); el.select(); } done(false); }
+    }catch(e){
+      const el = document.getElementById('filamentList'); if (el){ el.focus(); el.select(); }
+      done(false);
+    }
+  }
+}
+
+function renderKitHint(){
+  const el = document.getElementById('kitHint');
+  if (!el) return;
+  const kit = currentKit();
+  const xs = kit.fibers.map(g => kit.LOGS[g]);
+  const delta = (xs[xs.length-1] - xs[0]) / (xs.length - 1);
+  const gaps = [];
+  for (let i=1;i<xs.length;i++) gaps.push((xs[i]-xs[i-1]).toFixed(3));
+  el.innerHTML = `当前套件：<b>${esc(kit.label || state.meta.kit)}</b> · ${kit.fibers.length} 档 · ` +
+    `全范围 δ = (${xs[0]} → ${xs[xs.length-1]}) / ${kit.fibers.length-1} = <b>${delta.toFixed(4)}</b><br>` +
+    `<span class="mono" style="font-size:10.5px;">实际步长：${gaps.join(' · ')}</span><br>` +
+    `<span style="color:var(--warn)">⚠ δ 会随套件变化；换套件后请重算并重新导出（旧草稿仍是按旧套件算的）。</span>`;
+  refreshFilamentList();   // 套件变了，纤维丝模板跟着变
+}
+
+/* ── 时间点显示顺序（唯一真源）────────────────────────────
+   SCHEMA.timepoints 的数组顺序只是"默认值"；用户在①节里用 ◀▶ 或拖拽
+   调整后的顺序存在 state.tpOrder，所有渲染都走 tpSeq() / kidsOf()。
+   tpOrder 为 null 时回退到 SCHEMA 顺序。 */
+function tpSeq(){
+  // 无自定义顺序时（新建批次/清空草稿），按 hours 排序回退 ——
+  // 不能直接用 SCHEMA.timepoints 的数组顺序：那里的 h2.5 声明在 h2 之前，
+  // 会渲染成「药效2.5h → 药效2h」这种时间倒序。pre/model 无 hours，排最前。
+  if (!state || !state.tpOrder || !state.tpOrder.length){
+    return SCHEMA.timepoints.slice().sort((a,b) => {
+      const ha = tpHours(a), hb = tpHours(b);
+      if (ha === null && hb === null) return 0;
+      if (ha === null) return -1;
+      if (hb === null) return 1;
+      return ha - hb;
+    });
+  }
+  const map = new Map(SCHEMA.timepoints.map(t => [t.key, t]));
+  const out = [];
+  for (const k of state.tpOrder){ if (map.has(k)){ out.push(map.get(k)); map.delete(k); } }
+  for (const t of map.values()) out.push(t);          // 新加的、还没进 tpOrder 的接在后面
+  return out;
+}
+/* 某分组内的子时间点（按 tpOrder 排） */
+function kidsOf(grpKey){
+  const g = SCHEMA.timepointGroups.find(x => x.key === grpKey);
+  if (!g) return [];
+  const want = new Set(g.children);
+  return tpSeq().filter(t => want.has(t.key));
+}
+/* 把某时间点在全局顺序里往前/往后挪一位（dir: -1 前 / +1 后）
+   只在本分组内挪，跨组移动请改分组。 */
+function moveTp(key, dir){
+  const tp = SCHEMA.timepoints.find(t => t.key === key);
+  if (!tp) return;
+  const grp = tp.group ? SCHEMA.timepointGroups.find(g => g.key === tp.group) : null;
+  const list = grp ? kidsOf(grp.key) : tpSeq().filter(t => !t.group);
+  const i = list.findIndex(t => t.key === key);
+  const j = i + dir;
+  if (i < 0 || j < 0 || j >= list.length) return;
+  const next = list.slice();
+  [next[i], next[j]] = [next[j], next[i]];
+  const others = tpSeq().filter(t => (grp ? t.group !== grp.key : !t.group));
+  state.tpOrder = buildOrder(grp, next.map(t => t.key), others);
+  audit('reorder-tp', key, String(i), String(j), `在${grp ? '分组' + grp.label : '固定列'}内移动时间点`);
+  save(true); renderAll();
+  announce(`已移动到第 ${j + 1} 位。`);
+}
+function buildOrder(grp, orderedKeys, others){
+  // 骨架：固定列在前 → 其余各分组依次 → 本组用传入的新顺序覆盖 → 兜底补齐
+  // ⚠ 关键：本组必须用 orderedKeys 覆盖，不能再读 kidsOf()（那还是旧顺序）
+  const out = [];
+  const push = (k) => { if (k && !out.includes(k)) out.push(k); };
+  const byKey = new Map(SCHEMA.timepoints.map(t => [t.key, t]));
+  for (const t of tpSeq()) if (!t.group) push(t.key);            // 固定列，保持当前相对序
+  const myGroup = grp ? grp.key : '__fixed__';
+  for (const g of SCHEMA.timepointGroups){
+    if (g.key === myGroup){ for (const k of orderedKeys) push(k); }  // ← 本组用新顺序
+    else { for (const t of kidsOf(g.key)) push(t.key); }           // 其它组不动
+  }
+  for (const t of (others || [])) push(t.key);
+  for (const t of SCHEMA.timepoints) push(t.key);                  // 兜底
+  // 校验：SCHEMA 里存在但没进 out 的（理论上不会有）
+  for (const k of byKey.keys()) push(k);
+  return out;
+}
+/* 按标签里的时间数字排序（"药效2.5h" → 2.5；"造模前" → -Infinity） */
+function sortTpByLabel(){
+  // ⚠ label 是用户手填的、唯一可信的时间来源；t.hours 只是内置默认值，
+  //    两者可能不一致（例如 h1.5 的 hours 仍是 1.5，但 label 已被改成"药效2.5h"），
+  //    所以这里**以 label 为准**，只有 label 里解析不出数字时才退回 hours。
+  const val = (t) => {
+    const m = String(t.label || '').match(/(\d+(?:\.\d+)?)\s*h/i);
+    if (m) return parseFloat(m[1]);
+    if (t.hours != null) return t.hours;
+    return -Infinity;
+  };
+  const fixed = tpSeq().filter(t => !t.group);
+  const rest = tpSeq().filter(t => t.group);
+  // 分组内部各自按时间排，分组之间保持原有先后
+  // kidsOf 返回 tp **对象**，这里要的是 key
+  const orderedGroups = SCHEMA.timepointGroups.map(g =>
+    kidsOf(g.key).slice().sort((a, b) => val(a) - val(b)).map(t => t.key));
+  const out = fixed.map(t => t.key);
+  for (const gl of orderedGroups) for (const k of gl) if (!out.includes(k)) out.push(k);
+  for (const t of rest) if (!out.includes(t.key)) out.push(t.key);
+  const before = tpSeq().map(t => t.key).join(',');
+  state.tpOrder = out;
+  const after = out.join(',');
+  if (before === after){ announce('顺序已经正确，无需调整。'); return; }
+  audit('sort-tp', '全部时间点', before, after, '按标签中的时间数值排序');
+  save(true); renderAll();
+  announce('已按时间排序。');
+}
+
+/* ── P0-4 / P0-5：实测时间 + 测试频率告警 ──────────────────
+   领域规则（Garcia 2026 Sensory Neuroscience，见 §3.3）：
+     测试本身诱导敏化；安全线 = 每天 ≤2 次；"每小时 1 次（60min）"已是危害组。
+   本项目批次是"4h 内 7 次、多数间隔 30min"——比文献高频有害组更密。
+   这里把频率算出来，并在校验关里显式标红。 */
+
+/* 时间点的"相对给药小时数"（从 hours 字段或 label 解析；pre/model 返回 null） */
+function tpHours(tp){
+  if (tp.hours != null) return tp.hours;
+  const m = String(tp.label || '').match(/(\d+(?:\.\d+)?)\s*h\b/i);
+  if (m) return parseFloat(m[1]);
+  return null;
+}
+
+/* 计算给药后的测试频率。优先用实测钟点 timepointTimes（P0-4），
+   没填则退回名义 hours 差。 */
+function frequencyRisk(){
+  const opts = {};
+  const pts = tpSeq()
+    .filter(t => tpHours(t) !== null)          // 只看"给药后"类时间点
+    .sort((a, b) => tpHours(a) - tpHours(b));
+  const n = pts.length;
+  if (n < 2) return { n, highRisk:false, measured:false, note:'给药后时间点不足 2 个，无法评估频率' };
+
+  const keys = pts.map(t => t.key);
+  const T = state.timepointTimes || {};
+  const allMeasured = keys.every(k => T[k] && /^\d{1,2}:\d{2}$/.test(String(T[k]).trim()));
+  let intervals, spanH, source;
+  if (allMeasured){
+    // 实测钟点 → 真实分钟间隔（处理跨午夜：后一小时数小于前一则 +24h）
+    let mins = keys.map(k => { const [h,m] = String(T[k]).trim().split(':').map(Number); return h*60 + m; });
+    for (let i = 1; i < mins.length; i++) if (mins[i] < mins[i-1]) mins[i] += 1440;
+    intervals = mins.slice(1).map((m, i) => (m - mins[i]));
+    spanH = (mins[mins.length-1] - mins[0]) / 60;
+    source = 'measured';
+  } else {
+    const hs = keys.map(k => tpHours(tpSeq().find(t => t.key === k)));
+    intervals = hs.slice(1).map((h, i) => (h - hs[i]) * 60);
+    spanH = hs[hs.length-1] - hs[0];
+    source = 'nominal';
+  }
+  const minInt = Math.min.apply(null, intervals);
+  const medInt = intervals.slice().sort((a,b)=>a-b)[Math.floor(intervals.length/2)];
+  // 风险判定：>2 个点（超安全线"每天≤2次"）且 最小间隔 < 60min（比文献危害组更密）
+  const highRisk = n > 2 && minInt < 60;
+  return { n, highRisk, measured: source==='measured', intervals, minIntervalMin: minInt,
+           medianIntervalMin: medInt, spanHours: spanH };
+}
+
+function renderTpEditor(){
+  const host = document.getElementById('tpEditor');
+  if (!host) return;
+  let html = '';
+  // 固定 tp（造模前 / 造模后 + 已废弃）
+  const fixed = SCHEMA.timepoints.filter(t => !t.group);
+  const realFixed = fixed.filter(t => !t.deprecated);
+  const deprecatedTps = fixed.filter(t => t.deprecated);
+  html += `<div class="tp-grp"><div class="grp-h">
+    <span class="grp-lbl">固定列（不可删）</span>
+    <span style="flex:1"></span>
+    <button class="tiny sec" data-sort-tp title="按标签里的时间数值（如“药效2.5h”→2.5）重新排序全部时间点">⇅ 按时间排序</button>
+  </div><div class="tp-kids" data-kids-grp="__fixed__">`;
+  for (const t of realFixed){
+    html += `<span class="tp-kid tp-fixed" data-tpkey="${esc(t.key)}"><span class="kid-key">${esc(t.key)}</span> · <span class="kid-lbl">${esc(t.label)}</span></span>`;
+  }
+  html += '</div></div>';
+  // 已废弃（迁移过来的旧版时间点）
+  if (deprecatedTps.length){
+    html += `<div class="tp-grp" style="border-color:var(--warn);">
+      <div class="grp-h">
+        <span class="grp-lbl" style="color:var(--warn);">⚠ 已废弃时间点（旧版 SCHEMA）</span>
+        <span class="hint" style="margin:0;">数据还在但 schema 已变。请把数据复制到新 SCHEMA 里的子时间点，然后删除此列。</span>
+      </div>
+      <div class="tp-kids">`;
+    for (const t of deprecatedTps){
+      html += `<span class="tp-kid" style="border-color:var(--warn);background:var(--warn-bg);">
+        <span class="kid-key">${esc(t.key)}</span>
+        <input type="text" class="kid-lbl" data-rename-label="${esc(t.key)}" value="${esc(t.label)}">
+        <button class="danger" data-remove-tp="${esc(t.key)}" title="删除此时间点（包括其所有 cell 数据）">×</button>
+      </span>`;
+    }
+    html += '</div></div>';
+  }
+  // 时间点组（用来把若干时间点并到一个表头下，如"给药后"横跨 6 列）
+  for (const g of SCHEMA.timepointGroups){
+    const kids = kidsOf(g.key);
+    const kidsWithData = kids.filter(t => Object.keys(state.cells).some(k => k.includes('|' + t.key + '|')));
+    html += `<div class="tp-grp">
+      <div class="grp-h">
+        <span class="grp-lbl">时间点组：</span>
+        <input type="text" data-grp-label="${esc(g.key)}" value="${esc(g.label)}" style="min-width:100px;">
+        <span style="flex:1"></span>
+        <button class="tiny sec" data-sort-tp title="按标签里的时间数值（如“药效2.5h”→2.5）重新排序">⇅ 按时间排序</button>
+        <button class="tiny" data-add-sub="${esc(g.key)}">+ 加子时间点</button>
+        <button class="tiny danger" data-remove-group="${esc(g.key)}"
+          title="删除这个时间点组${kids.length ? '（连同组内 ' + kids.length + ' 个时间点）' : ''}">删除本组</button>
+      </div>
+      <div class="tp-kids" data-kids-grp="${esc(g.key)}">`;
+    for (let ki = 0; ki < kids.length; ki++){
+      const t = kids[ki];
+      const hasData = Object.keys(state.cells).some(k => k.includes('|' + t.key + '|'));
+      const tt = (state.timepointTimes || {})[t.key] || '';
+      const tpHrs = tpHours(t);
+      const showTime = tpHrs != null;   // 只有"给药后"类时间点需要实测钟点
+      html += `<span class="tp-kid drag-handle" draggable="true" data-tpkey="${esc(t.key)}"
+                    title="按住拖动可调整顺序">
+        <span class="kid-key">${esc(t.key)}</span>
+        <input type="text" class="kid-lbl" data-rename-label="${esc(t.key)}" value="${esc(t.label)}">
+        ${showTime
+          ? `<input type="text" inputmode="numeric" class="kid-time" data-testtime="${esc(t.key)}"
+                   value="${esc(tt)}" placeholder="HH:MM" maxlength="5" size="5"
+                   title="实测钟点（如 10:22）。填了才能算真实测试频率，否则按名义小时推算。"
+                   aria-label="时间点 ${esc(t.label)} 的实测钟点 HH:MM">`
+          : ''}
+        <button class="mv" data-mv="${esc(t.key)}" data-dir="-1" ${ki===0?'disabled':''} title="往前挪一位" aria-label="把 ${esc(t.label)} 往前挪一位">◀</button>
+        <button class="mv" data-mv="${esc(t.key)}" data-dir="1" ${ki===kids.length-1?'disabled':''} title="往后挪一位" aria-label="把 ${esc(t.label)} 往后挪一位">▶</button>
+        <button class="danger" data-remove-tp="${esc(t.key)}" title="删除此时间点${hasData ? '（含已录数据）' : ''}">×</button>
+      </span>`;
+    }
+    if (!kids.length) html += '<span class="hint" style="margin:0;">（空组，没有任何时间点）点上方"+ 加子时间点"，或点右侧「删除本组」删掉它</span>';
+    if (kidsWithData.length){
+      html += `<div class="hint" style="color:var(--warn);margin-top:4px;">⚠ 组内 ${kidsWithData.map(t=>t.label).join('、')} 已有数据；删组会一并删掉这些数据。</div>`;
+    }
+    html += '</div></div>';
+  }
+  // "新建时间点组"按钮
+  html += '<button class="tiny sec" data-add-grp style="margin-top:6px;">+ 新建时间点组</button>';
+  host.innerHTML = html;
+}
+
+function addSubTimepoint(grpKey){
+  const keyRaw = prompt('子时间点 key（英文，建议 h0.5 / h1 / h4 / custom1 …）：');
+  if (!keyRaw) return;
+  const key = keyRaw.trim();
+  if (!/^[a-z0-9.\-_]+$/i.test(key)){ alert('key 只能含英文 / 数字 / 点 / 下划线 / 短横'); return; }
+  if (SCHEMA.timepoints.some(t => t.key === key)){ alert('key 已存在：' + key); return; }
+  const label = prompt('显示标签（中文，会写进网站 CSV ID）：\n例如：药效0.5h / 药效1h / 药效2h', '药效' + key.replace(/^h/, '').replace(/\.5/, '.5h') + 'h');
+  if (!label) return;
+  snapshot();
+  const old = SCHEMA.timepoints.filter(t => t.group === grpKey).map(t => t.key).join(',');
+  SCHEMA.timepoints.push({ key, label: label.trim(), group: grpKey });
+  const grp = SCHEMA.timepointGroups.find(g => g.key === grpKey);
+  if (grp) grp.children.push(key);
+  audit('add-subtimepoint', key, old, grp.children.join(','), `分组 ${grpKey} 加子时间点 ${key} (label: ${label})`);
+  save(true); renderAll(); announce(`已加子时间点 ${key} = ${label}`);
+}
+function removeSubTimepoint(key){
+  const tp = SCHEMA.timepoints.find(t => t.key === key);
+  if (!tp) return;
+  const hasData = Object.keys(state.cells || {}).some(k => k.includes('|' + key + '|'));
+  const warnExtra = hasData ? `\n\n⚠ 该时间点下还有 ${Object.keys(state.cells).filter(k => k.includes('|' + key + '|')).length/2|0} 只鼠 × 1 时间点的数据，删除会一并清掉。` : '';
+  if (!confirm(`删除时间点 "${tp.label}"（${key}）？${warnExtra}`)) return;
+  snapshot();
+  const old = tp.label;
+  SCHEMA.timepoints = SCHEMA.timepoints.filter(t => t.key !== key);
+  for (const g of SCHEMA.timepointGroups) g.children = g.children.filter(k => k !== key);
+  // 清掉该时间点下的所有 cells
+  for (const k of Object.keys(state.cells)) if (k.includes('|' + key + '|')) delete state.cells[k];
+  // 也清掉 webImports
+  for (const k of Object.keys(state.webImports)) if (k.startsWith(key + '|') || k.includes('|' + key + '|')) delete state.webImports[k];
+  audit('remove-subtimepoint', key, old, '', `已删子时间点 ${key}${hasData ? '（含其下所有 cell）' : ''}`);
+  save(true); renderAll(); announce(`已删 ${key}`);
+}
+function renameSubTimepoint(key, newLabel){
+  const tp = SCHEMA.timepoints.find(t => t.key === key);
+  if (!tp || !newLabel.trim() || newLabel === tp.label) return;
+  snapshot();
+  const old = tp.label;
+  tp.label = newLabel.trim();
+  TP_LABEL[key] = tp.label;
+  audit('rename-subtimepoint', key, old, tp.label, '子时间点重命名');
+  save(true); renderAll();
+}
+function renameGroupLabel(grpKey, newLabel){
+  const g = SCHEMA.timepointGroups.find(x => x.key === grpKey);
+  if (!g || !newLabel.trim() || newLabel === g.label) return;
+  snapshot();
+  const old = g.label;
+  g.label = newLabel.trim();
+  audit('rename-group', grpKey, old, g.label, '分组标签改名');
+  save(true); renderAll();
+}
+function addNewGroup(){
+  const key = prompt('新时间点组 key（英文，如 recovery / washout）：');
+  if (!key) return;
+  if (SCHEMA.timepointGroups.some(g => g.key === key)){ alert('已存在'); return; }
+  const label = prompt('时间点组显示标签（中文，如 "清洗期"）：') || key;
+  snapshot();
+  SCHEMA.timepointGroups.push({ key, label, children: [] });
+  audit('add-group', key, '', label, '新增时间点组');
+  save(true); renderAll(); announce(`已新建时间点组「${label}」。接着点组里的"+ 加子时间点"添加时间点。`);
+}
+/* 删除一个时间点组（连同组内时间点及其数据）。
+   注意：这里删的是**时间点组**（表头横跨的那种），不是动物的"组别"。 */
+function removeTimepointGroup(key){
+  const g = SCHEMA.timepointGroups.find(x => x.key === key);
+  if (!g) return;
+  const kids = g.children.map(k => SCHEMA.timepoints.find(t => t.key === k)).filter(Boolean);
+  // 统计组内已录数据
+  const dataCells = Object.keys(state.cells).filter(k => kids.some(t => k.includes('|' + t.key + '|')));
+  const nAnimals = new Set(dataCells.map(k => k.split('|')[0])).size;
+  let msg = `删除时间点组「${g.label}」？`;
+  if (kids.length) msg += `\n\n组内有 ${kids.length} 个时间点：${kids.map(t => t.label).join('、')}。`;
+  if (dataCells.length) msg += `\n⚠ 其中已有 ${nAnimals} 只鼠 × 若干时间点的数据，会被一并删除。`;
+  msg += '\n\n（如果你只是想把动物的组别分开显示，那不是在这里改 —— 请在②表里填「组别」列。）';
+  if (!confirm(msg)) return;
+
+  snapshot();
+  const oldDesc = `group=${g.key}(${g.label}); tps=${kids.map(t=>t.key).join(',')}`;
+  // 删组内时间点及其 cells
+  for (const t of kids){
+    for (const k of Object.keys(state.cells)) if (k.includes('|' + t.key + '|')) delete state.cells[k];
+    for (const k of Object.keys(state.webImports || {})) if (k.includes('|' + t.key + '|')) delete state.webImports[k];
+  }
+  SCHEMA.timepoints = SCHEMA.timepoints.filter(t => !g.children.includes(t.key));
+  SCHEMA.timepointGroups = SCHEMA.timepointGroups.filter(x => x.key !== key);
+  audit('remove-group', key, oldDesc, '', `删除时间点组「${g.label}」${kids.length ? '（连同组内 ' + kids.length + ' 个时间点）' : ''}`);
+  save(true); renderAll();
+  announce(`已删除时间点组「${g.label}」${kids.length ? '及其 ' + kids.length + ' 个时间点' : ''}。`);
+}
+
+function renderHead(){
+  const th = document.getElementById('gridHead');
+  // 顶层表头：动物信息列 + 独立 tp + 分组（带 colspan）
+  let top = '<tr>';
+  top += '<th class="sticky-c" scope="col" rowspan="2">动物编号</th>';
+  top += '<th scope="col" rowspan="2">组别</th>';
+  top += '<th scope="col" class="num" rowspan="2">体重 (g)</th>';
+  // 独立 tp（group === null 的）
+  for (const tp of tpSeq()){
+    if (tp.group) continue;
+    const cls = tp.deprecated ? 'tp-h tp-deprecated' : 'tp-h';
+    const u = tp.deprecated ? `${esc(tp.key)} · ⚠ 已废弃` : `${esc(tp.key)} · 序列 · 起点 · PWT`;
+    top += `<th class="${cls}" scope="col" rowspan="2"><span class="lbl">${esc(tp.label)}</span><span class="u">${u}</span></th>`;
+  }
+  // 分组
+  for (const g of SCHEMA.timepointGroups){
+    const kids = kidsOf(g.key);
+    if (!kids.length) continue;
+    top += `<th class="tp-grp-h" scope="col" colspan="${kids.length}"><span class="lbl">${esc(g.label)}</span><span class="u">药效时间点</span></th>`;
+  }
+  top += '<th scope="col" rowspan="2">行备注</th>';
+  top += '<th class="del-c no-print" scope="col" rowspan="2">操作</th>';
+  top += '</tr>';
+  // 第二行：分组下的子时间点 label（用 kidsOf 返回的对象，避免二次 find 拿到 undefined）
+  let sub = '<tr>';
+  for (const g of SCHEMA.timepointGroups){
+    for (const tp of kidsOf(g.key)){
+      const cls = tp.deprecated ? 'tp-h tp-deprecated' : 'tp-h';
+      sub += `<th class="${cls}" scope="col"><span class="lbl">${esc(tp.label)}</span><span class="u">${esc(tp.key)}</span></th>`;
+    }
+  }
+  sub += '</tr>';
+  th.innerHTML = top + sub;
+}
+
+function cellBlockHTML(s, tp){
+  const seqC = findCell(cellKey(s.id, tp.key, 'seq'));
+  const sfC  = findCell(cellKey(s.id, tp.key, 'startForce'));
+  const pwtC = findCell(cellKey(s.id, tp.key, 'pwt'));
+  const seqKey = cellKey(s.id, tp.key, 'seq');
+  const sfKey  = cellKey(s.id, tp.key, 'startForce');
+
+  const seqV = validateCell(s.id, tp.key, 'seq');
+  const sfV  = validateCell(s.id, tp.key, 'startForce');
+  const trials = getTrials(s.id, tp.key);
+  const pwtObj = (seqV.level === 'ok' && sfV.level === 'ok') ? getPwt(s.id, tp.key) : null;
+  const pwt = pwtValue(pwtObj);
+  const kit = currentKit();
+  const sigma = (kit.LOGS[kit.fibers[kit.fibers.length-1]] - kit.LOGS[kit.fibers[0]]) / (kit.fibers.length-1);
+  // 无转折（全 X / 全 O）→ 阈值落在测试范围外，只能给区间（官网：">x" or "x<"）
+  // ⚠ 判据只看序列是否可用，**不能**要求 seqV.level==='ok'：
+  //    5 位短序列（如 XXXXX）会被标成 warn/k-unavailable，而它恰恰最常出现在
+  //    边界情形（动物在最低档连续缩足）。若要求 'ok'，这些格子会漏掉边界显示。
+  const seqUsable = seqV.level !== 'bad' && seqV.level !== 'missing' && seqV.level !== 'empty';
+  const bnd = seqUsable ? boundaryOutcome(String(seqC.v||'').toUpperCase().replace(/[^OX]/g,''), effectiveStart(sfC.v), kit.fibers) : null;
+  const kVal = (pwt !== null && !bnd && trials.length >= 6) ? pwtK(trials.map(t=>t[1]).join(''), trials[trials.length-1][0], kit.LOGS, sigma) : null;
+
+  const order = ['bad','warn','missing','empty','ok'];
+  const worst = [seqV.level, sfV.level].reduce((a,b) => order.indexOf(a) <= order.indexOf(b) ? a : b, 'ok');
+  const cls = cellClass(worst);
+  const mark = (worst === 'ok' && pwt !== null) ? cellMark('ok') : cellMark(worst);
+
+  const errId = 'err-' + cssId(s.id+'_'+tp.key);
+  const descId = 'desc-' + cssId(s.id+'_'+tp.key);
+  const bubbleMsg = (seqV.level==='bad' && seqV.msg) || (sfV.level==='bad' && sfV.msg) || '';
+
+  const seqVis = seqC.v ? colorizeSeq(seqC.v, trials) : '<span style="color:var(--muted)">— 序列 —</span>';
+  const kDisp = kVal !== null ? `<span class="k-disp" style="color:var(--muted);margin-left:4px;">· k表 ${kVal.toFixed(2)}</span>` : '';
+
+  // 末次力值（网站 CSV 的 Final Filament）—— 显示出来便于与网站核对
+  const finalF = (seqV.level === 'ok') ? finalForceOf(String(seqC.v||'').toUpperCase().replace(/[^OX]/g,''), effectiveStart(sfC.v), kit.fibers) : null;
+  const finalDisp = (finalF != null) ? esc(String(finalF)) : '—';
+
+  const allowOv = state.meta.allowOverride === 'on';
+  const pwtDisplay = bnd
+    ? `<span class="pwt-val derived" style="color:var(--warn);font-weight:700;" title="${esc(bnd.why)}">${esc(bnd.text)}<span style="font-size:10px;font-weight:400;opacity:.6;"> ${bnd.kind==='min' ? '↙' : '↖'}取${bnd.kind==='min' ? '最低' : '最高'}</span></span>`
+    : allowOv
+    ? `<input type="text" inputmode="decimal" autocomplete="off" spellcheck="false" class="override-input"
+            data-ov="${esc(seqKey)}" value="${esc(pwtC.v)}" aria-label="${esc(s.id + ' ' + tp.label + ' PWT 覆盖（单位 g）')}">`
+    : (pwt !== null ? `<span class="pwt-val derived" data-pwt="${esc(s.id+'|'+tp.key)}">${pwt.toFixed(3)}</span>` : '<span style="color:var(--muted)">—</span>');
+
+  // 网站导入值（来自 bioapps 工具）
+  const webKey = cellKey(s.id, tp.key, 'pwt');
+  const webImp = state.webImports && state.webImports[webKey];
+  // 网站权威值 + 与派生值的相对差（用户已定：以网站为准，这里只是让偏离可见）
+  let webDisp = '';
+  if (webImp && webImp.threshold !== undefined && webImp.threshold !== ''){
+    const wNum = Number(webImp.threshold);
+    const wIsCens = isNaN(wNum);
+    const wTxt = wIsCens ? String(webImp.threshold) : wNum.toFixed(3);
+    let relTxt = '';
+    if (!wIsCens && pwt !== null && wNum > 0){
+      const rel = (pwt / wNum - 1) * 100;
+      const a = Math.abs(rel);
+      const col = a <= 5 ? 'var(--ok)' : (a <= 15 ? 'var(--warn)' : '#a33');
+      relTxt = ` <span style="font-size:10px;color:${col};font-weight:400;">(${rel >= 0 ? '+' : ''}${rel.toFixed(0)}%)</span>`;
+    }
+    webDisp = `<span class="pwt-val web" title="网站 DTU/Rigshospitalet 工具（k=${webImp.kValue ?? '?'}, δ=${webImp.delta ?? '?'}）· 导入于 ${webImp.importedAt || ''}。绿色=以网站值为准；括号内是本工具派生值与网站的相对差。${wIsCens ? '此格为无转折删失值。' : ''}"
+         style="color:var(--ok);font-style:italic;margin-left:6px;font-weight:600;">⇆ ${esc(wTxt)}${relTxt}</span>`;
+  }
+
+  // 已废弃时间点（从旧版 schema 迁移来的）整列淡黄底，提醒用户去迁移
+  const tdCls = tp.deprecated ? ' class="tp-deprecated-c"' : '';
+  return `<td${tdCls}><div class="tp ${cls}" data-tp-cell="${esc(s.id+'|'+tp.key)}">
+    ${tp.deprecated ? `<div style="font-size:10.5px;color:var(--warn);font-weight:600;margin-bottom:2px;">⚠ 已废弃 · 请迁到新子时间点</div>` : ''}
+    <div class="seq-row">
+      <input type="text" autocomplete="off" spellcheck="false" class="seq-inp"
+        id="in-${cssId(seqKey)}" data-key="${esc(seqKey)}" value="${esc(seqC.v)}"
+        placeholder="o/x"
+        aria-label="${esc(s.id + ' ' + tp.label + ' O/X 序列')}"
+        aria-describedby="${descId}${needsBubble(worst) ? ' ' + errId : ''}"
+        ${worst==='bad' ? 'aria-invalid="true"' : ''}
+        ${worst==='missing' ? 'aria-required="true"' : ''}>
+      <select class="start-sel" data-key="${esc(sfKey)}"
+        aria-label="${esc(s.id + ' ' + tp.label + ' 起点力值（g）')}">
+        ${(() => {
+          // 默认 0.16（避免空值时浏览器回退到第一个选项=0.07/0.008）
+          const cur = +sfC.v;
+          const def = defaultStartForce();   // ★ P1-7：走单一真源，别内联取值
+          const sel = kit.fibers.includes(cur) ? cur : (kit.fibers.includes(def) ? def : kit.fibers[1] || kit.fibers[0]);
+          return kit.fibers.map(g => `<option value="${g}" ${sel===g?'selected':''}>${g}</option>`).join('');
+        })()}
+      </select>
+    </div>
+    <div class="seq-vis" aria-hidden="true">${seqVis}</div>
+    <div class="pwt-row">
+      <span><b>PWT</b> ${pwtDisplay} <span style="color:var(--muted);">g</span>${kDisp}${webDisp}</span>
+    </div>
+    <div class="pwt-row" style="min-height:14px;">
+      <span style="font-size:10.5px;color:var(--muted);">
+        起点 <b style="color:var(--ink);">${esc(String(effectiveStart(sfC.v)))}</b>
+        → 末次 <b style="color:var(--accent);">${finalDisp}</b>
+        <span title="网站 CSV 的 Final Filament 用这个值">（网站用）</span>
+      </span>
+    </div>
+    <span class="mark" aria-hidden="true">${mark}</span>
+    <span id="${descId}" class="sr">${esc(tp.label)}。序列小写字母 o/x；起点力值 ${esc(kit.fibers.join('/'))} g。</span>
+    <span id="${errId}" class="err" role="alert">${esc(bubbleMsg)}</span>
+  </div></td>`;
+}
+
+function colorizeSeq(seqStr, trials){
+  const s = String(seqStr).toUpperCase().replace(/[^OX]/g,'');
+  if (!s) return '';
+  let html = '';
+  for (let i=0;i<s.length;i++){
+    const r = s[i];
+    const g = trials[i] ? trials[i][0] : defaultStartForce();
+    const col = currentKit().fibers.includes(g) ? (g<=0.16?'g':(g<=0.6?'lb':'p')) : '';
+    html += `<span class="gx ${r.toLowerCase()} ${col}">${r}</span>`;
+  }
+  return html;
+}
+
+// 当前"相邻分组序列"的指纹：只有它变了才需要重排分隔条
+function groupSignature(){
+  return state.subjects.map(s => s.grp || '(未分组)').join('\u0001');
+}
+
+// 给组名分配稳定的颜色 hash（同一组名每次刷新颜色一致）
+function grpClassFor(grp){
+  if (!grp) return 'grp-color-0';
+  let h = 0;
+  for (let i = 0; i < grp.length; i++) h = ((h << 5) - h + grp.charCodeAt(i)) | 0;
+  return 'grp-color-' + (Math.abs(h) % 6);
+}
+
+function renderBody(refocusKey){
+  const tb = document.getElementById('gridBody');
+  if (!state.subjects.length){
+    tb.innerHTML = `<tr><td colspan="${4 + SCHEMA.timepoints.length}" style="text-align:center;color:var(--muted);padding:36px;">
+      尚未添加任何动物。点上方"+ 添加动物"开始录入，或点"载入 demo"看示例。
+    </td></tr>`;
+    // ↑ 早期版本此处误写成 </td>（漏了 </tr>），导致空态表格行结构不完整
+    renderChecks(); renderAudit(); renderExport();
+    return;
+  }
+  let html = '';
+  // 按 grp 分组渲染（视觉分隔条 subhead）
+  const totalCols = 3 + SCHEMA.timepoints.length + 2;  // 动物编号+组别+体重 + 时间点 + 行备注+操作
+  // 先算好每组的只数，直接写进模板 —— 不必渲染完再回头查 DOM 回填（少一趟、也不依赖 querySelectorAll）
+  const counts = {};
+  for (const s of state.subjects){
+    const g = s.grp || '(未分组)';
+    counts[g] = (counts[g] || 0) + 1;
+  }
+  state.subjects.forEach((s, si) => {
+    const grp = s.grp || '(未分组)';
+    if (si === 0 || grp !== (state.subjects[si-1].grp || '(未分组)')){
+      // 新组的开始 → 插入分隔条 subhead
+      html += `<tr class="grp-subhead" data-grp-key="${esc(grp)}">
+        <td colspan="${totalCols}" class="grp-subhead-td ${grpClassFor(grp)}">
+          <span class="grp-subhead-lbl">▸ 组：${esc(grp)}</span>
+          <span class="grp-subhead-count">（${counts[grp]} 只）</span>
+        </td>
+      </tr>`;
+    }
+    const noteKey = cellKey(s.id, '_row', 'note');
+    const nc = findCell(noteKey);
+    html += '<tr>';
+    html += `<td class="sticky-c subid">${si+1}. <input type="text" data-subid="${si}" value="${esc(s.id)}" autocomplete="off" aria-label="动物 ${si+1} 编号"></td>`;
+    html += `<td class="grp"><input type="text" data-grp="${si}" value="${esc(s.grp)}" autocomplete="off" aria-label="动物 ${si+1} 组别"></td>`;
+    html += `<td class="wt"><input type="text" inputmode="decimal" data-wt="${si}" value="${esc(s.wt)}" autocomplete="off" aria-label="动物 ${si+1} 体重（g）"></td>`;
+    for (const tp of tpSeq()) html += cellBlockHTML(s, tp);
+    html += `<td class="note-c"><input type="text" data-rnote="${si}" value="${esc(nc.v)}" autocomplete="off" placeholder="可选" aria-label="动物 ${si+1} 行备注"></td>`;
+    html += `<td class="del-c no-print"><button class="tiny sec" data-delsub="${si}" title="删除该动物及其全部数据">删</button></td>`;
+    html += '</tr>';
+  });
+  tb.innerHTML = html;
+
+  if (refocusKey){
+    const el = document.getElementById('in-' + cssId(refocusKey));
+    if (el){ el.focus(); el.select && el.select(); }
+  }
+}
+
+function list3(a){ return a.slice(0,3).join('、') + (a.length > 3 ? ' …' : ''); }
+
+/* 把"为什么不能导出"说清楚（WCAG 3.3.3：给修正建议，别只说"错了"） */
+function blockedReason(r){
+  const parts = [];
+  if (r.dupIds && r.dupIds.length) parts.push(`动物编号重复（${list3(r.dupIds)}）——同名动物的数据会互相覆盖`);
+  if (r.miss && r.miss.length) parts.push(`${r.miss.length} 个必填项未录`);
+  if (r.bad && r.bad.length) parts.push(`${r.bad.length} 处格式/范围错误`);
+  if (r.metaMiss && r.metaMiss.length) parts.push(`缺元数据：${r.metaMiss.join('、')}`);
+  return '还不能导出：' + (parts.join('；') || '存在未通过校验的项') + '。';
+}
+
+function renderChecks(){
+  const host = document.getElementById('checkList');
+  const gates = [];
+  let total = 0, filled = 0;
+  const bad = [], miss = [];
+
+  for (const s of state.subjects){
+    for (const tp of tpSeq()){
+      for (const m of SCHEMA.metrics){
+        // 派生值（PWT 由 seq+起点力值算出）不算"必填项" —— 用户没有输入它的动作。
+        // 把它计入 total 会让进度永远到不了 100%，还会让"未录"清单里塞满无法操作的行。
+        const derived = m.source === 'derived';
+        if (m.required && !derived) total++;
+        const k = cellKey(s.id, tp.key, m.key);
+        const raw = String(findCell(k).v ?? '').trim();
+        const v = validateCell(s.id, tp.key, m.key);
+        if (raw !== '' && m.required && !derived) filled++;
+        const label = `${s.id} / ${tp.key} / ${m.label}`;
+        if (v.level === 'bad') bad.push({ label, msg: v.msg, key: k });
+        // 派生值未算出（源字段还没填）不是"漏录"，不该出现在待办清单里
+        if (v.level === 'missing' && !derived) miss.push({ label, msg: v.msg, key: k });
+      }
+    }
+  }
+  const soft = softIssues();
+  const open = soft.filter(q => !q.resolved);
+  const cross = crossIssues();
+
+  gates.push({ level: miss.length ? 'bad' : 'ok', title: '① 完整性',
+    msg: miss.length ? `${miss.length} 个必填项未录：${list3(miss.map(x => x.label))}` : `必填项 ${total} 项全部已录 ✓` });
+  gates.push({ level: bad.length ? 'bad' : 'ok', title: '② 硬范围 / 格式',
+    msg: bad.length ? `${bad.length} 处错误：${list3(bad.map(b => b.label))}` : '所有数值在允许范围内、格式合法 ✓' });
+  gates.push({ level: open.length ? 'warn' : 'ok', title: '③ 软范围（Query）',
+    msg: !soft.length ? '无超出常规范围的值 ✓'
+       : open.length ? `${open.length} 条 Query 待澄清（共 ${soft.length} 条）：${list3(open.map(q => `${q.sub}/${q.tp}`))}`
+       : `${soft.length} 条 Query 已全部澄清并留档 ✓` });
+  gates.push({ level: cross.length ? 'warn' : 'ok', title: '④ 跨字段一致性',
+    msg: cross.length ? `${cross.length} 处待复核：${esc(cross[0].msg)}` : '指标间关系合理 ✓' });
+
+  const dupIds = dupSubjectIds();
+  gates.push({ level: dupIds.length ? 'bad' : 'ok', title: '⑤ 动物编号唯一性',
+    msg: dupIds.length
+      ? `编号重复：${list3(dupIds)}。同名动物的 cells 会互相覆盖，必须先改掉。`
+      : `${state.subjects.length} 个动物编号互不重复 ✓` });
+
+  const metaMiss = [];
+  if (!state.meta.protocol.trim()) metaMiss.push('方案编号');
+  if (!state.meta.operator.trim()) metaMiss.push('录入人');
+  gates.push({ level: metaMiss.length ? 'bad' : 'ok', title: '⑥ 元数据',
+    msg: metaMiss.length ? `缺：${metaMiss.join('、')}（缺元数据的数据事后无法追溯，不满足 ALCOA Attributable）`
+                          : '方案编号 / 录入人已填 ✓' });
+
+  gates.push({ level: state.subjects.length ? 'ok' : 'warn', title: '⑦ 数据范围',
+    msg: state.subjects.length ? `${state.subjects.length} 只鼠 × ${SCHEMA.timepoints.length} 个时间点`
+                              : '尚未添加任何动物' });
+
+  // ⑧ 测试频率（P0-5）：给药后密集测试 → 诱导敏化风险（Garcia 2026）
+  const fr = frequencyRisk();
+  let frMsg = '';
+  if (fr.n < 2){
+    frMsg = '给药后时间点不足 2 个，无法评估频率';
+  } else {
+    const ints = (fr.intervals || []).map(x => Math.round(x)).join('/');
+    const src = fr.measured ? '（实测钟点）' : '（名义小时，未填实测钟点）';
+    frMsg = `给药后 ${fr.n} 个时间点，间隔 ${ints} min，跨 ${fr.spanHours.toFixed(1)} h${src}`;
+    if (fr.highRisk){
+      frMsg += `；⚠ 间隔 < 60 min → 超过文献安全线（每天 ≤2 次），比对侧高频有害组（每小时 1 次）更密，会诱导敏化（足底不可恢复）。建议设频率对照组或在论文中报告（见指导论文 §3.3）`;
+    }
+  }
+  gates.push({ level: fr.highRisk ? 'bad' : 'ok', title: '⑧ 测试频率',
+    msg: fr.highRisk ? '⚠ ' + frMsg : frMsg });
+
+  host.innerHTML = gates.map(g => `<div class="check ${g.level}" role="listitem">
+    <span class="ic" aria-hidden="true">${g.level==='ok'?'✓':g.level==='warn'?'△':'!'}</span>
+    <span class="tt">${esc(g.title)}</span><span class="ms">${esc(g.msg)}</span></div>`).join('');
+
+  const pct = total ? Math.round(filled / total * 100) : 0;
+  const p = document.getElementById('progressPill');
+  p.textContent = `已填 ${filled} / ${total} 项（${pct}%）`;
+  p.className = 'pill ' + (pct === 100 ? 'ok' : pct > 0 ? 'info' : 'warn');
+
+  renderIssues(bad, miss);
+  renderQueries(soft, cross);
+  return {
+    // 重复动物编号必须阻止导出：它会让 cells 互相覆盖，导出的是被污染的数据
+    blocking: bad.length > 0 || miss.length > 0 || metaMiss.length > 0 || dupIds.length > 0,
+    bad, miss, soft, open, cross, metaMiss, dupIds,
+  };
+}
+
+function renderIssues(bad, miss){
+  const host = document.getElementById('issueList');
+  const items = bad.map(x => ({ ...x, kind:'bad' })).concat(miss.map(x => ({ ...x, kind:'miss' })));
+  if (!items.length){
+    host.innerHTML = '<p class="hint" style="margin:6px 0 0;">当前没有错误项。若某格被标红，把鼠标移到格上或聚焦即可看到原因，也可在这里点开。</p>';
+    return;
+  }
+  host.innerHTML = items.map(x => {
+    const seqKey = x.key.endsWith('|seq') ? x.key : null;
+    const targetId = seqKey ? `in-${cssId(seqKey)}` : null;
+    return `<div class="issue ${x.kind}" role="listitem">
+      <span class="ic" aria-hidden="true">${x.kind === 'bad' ? '!' : '–'}</span>
+      <a href="#${targetId || ''}" data-goto="${esc(x.key)}">${esc(x.label)}</a>
+      <span class="ms">${esc(x.msg)}</span>
+    </div>`;
+  }).join('');
+}
+
+let querySig = '';
+function renderQueries(soft, cross){
+  const sec = document.getElementById('secQuery');
+  const host = document.getElementById('queryList');
+  const sig = JSON.stringify([soft.map(q => [q.key, q.val, q.ack, q.reason]), cross.map(c => c.msg)]);
+  if (sig === querySig) return;
+  querySig = sig;
+  if (!soft.length && !cross.length){ sec.style.display = 'none'; host.innerHTML = ''; return; }
+  sec.style.display = '';
+  const rows = soft.map(q => {
+    const id = 'q-' + cssId(q.key);
+    const m = q.metric;
+    return `<div class="query" role="listitem">
+      <span class="where">${esc(q.sub)} / ${esc(q.tp)} · ${esc(m.label)}
+        <span class="pill ${q.resolved?'ok':'warn'}">${q.resolved?'已澄清':'待澄清'}</span></span>
+      <span class="val">${esc(q.val)} ${esc(m.unit)}</span>
+      <label class="sr" for="${id}">${esc(q.sub)} ${esc(q.tp)} ${m.label} 值的澄清理由</label>
+      <input type="text" id="${id}" data-reason="${esc(q.key)}" value="${esc(q.reason)}"
+        placeholder="说明这个值为什么是真的（≥4 字），例如：动物反应极弱，已复测一次">
+      <label class="f" style="flex-direction:row;align-items:center;gap:6px;">
+        <input type="checkbox" data-ack="${esc(q.key)}" ${q.ack?'checked':''}>
+        <span style="font-size:12px;">已复核</span>
+      </label>
+    </div>`;
+  });
+  const extra = cross.map(c => `<div class="query" role="listitem">
+      <span class="where">${esc(c.label)}</span>
+      <span class="val">跨字段</span>
+      <span class="ms" style="font-size:12.5px;">${esc(c.rule)}：${esc(c.msg)}</span>
+      <span class="pill warn">需人工复核</span>
+    </div>`);
+  host.innerHTML = rows.concat(extra).join('');
+}
+
+function renderAudit(){
+  const host = document.getElementById('auditLog');
+  if (!state.audit.length){ host.innerHTML = '<div style="color:var(--muted);font-size:12px;">尚无变更记录。任何字段编辑、对象增删、单位调整都会自动记入这里。</div>'; return; }
+  host.innerHTML = state.audit.slice().reverse().map(a => `<div class="ln">
+    <span class="ts">${esc(a.ts)}</span>
+    <span class="ac">${esc(a.action)}</span>
+    <span><span style="color:var(--muted)">${esc(a.actor)} · ${esc(a.target)}</span>${a.from!==''||a.to!=='' ? ` · <span class="old">${esc(a.from||'∅')}</span> → <span class="new">${esc(a.to||'∅')}</span>` : ''}${a.reason ? ` · 理由：${esc(a.reason)}` : ''}</span>
+  </div>`).join('');
+}
+
+function renderExport(){ document.getElementById('out').textContent = toCsv() || '录入数据后这里显示导出内容。'; }
+
+function renderAll(refocusKey){
+  renderMeta();
+  renderHead();
+  renderBody(refocusKey);
+  renderChecks();
+  renderAudit();
+  renderExport();
+  renderWebCompare();
+  // 归档状态（网站原始 CSV 是否已保全）
+  try{ renderArchiveStatus(); }catch(e){}
+  // 异步刷新当前归档目录（读 IDB 句柄），不阻塞渲染
+  if (typeof refreshArchiveDirInfo === 'function') refreshArchiveDirInfo();
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ *  5. 导出
+ * ══════════════════════════════════════════════════════════════════════════ */
+function csvCell(s){ const t = String(s ?? ''); return /[",\n]/.test(t) ? '"' + t.replace(/"/g,'""') + '"' : t; }
+
+function toCsv(){
+  // ★ P1-6：原来只有 subject，丢了组别/体重。后果是 CSV 往返后
+  //   applyWebImport 重建动物时 wt 是凭空捏造的 25.0、grp 沿用上一只鼠，
+  //   而 pwt-treat 跨字段规则依赖 group 判断溶剂组 → 会给出错误结论。
+  const head = ['subject','group','weight_g','timepoint','metric','label','value','unit','status','reason','operator','recorded_at','protocol','date','notes','device'];
+  const lines = [head.join(',')];
+  for (const s of state.subjects) for (const tp of tpSeq()) for (const m of SCHEMA.metrics){
+    const k = cellKey(s.id, tp.key, m.key);
+    const c = findCell(k);
+    let val, status, reason = c.reason || '', at = c.at || '';
+    if (m.source === 'derived'){
+      // ★ 派生指标没有单元格，必须现算 —— 原实现只读 c.v 拿到空串，
+      //    导出的 PWT 列全是 missing，等于把最重要的结果丢了。
+      const bnd = boundaryOutcome(String(getSeq(s.id, tp.key)||'').toUpperCase().replace(/[^OX]/g,''),
+                                  getStart(s.id, tp.key), currentKit().fibers);
+      if (bnd){                       // 无转折 → 只能给区间（官网规则 ">x" / "x<"）
+        val = bnd.text;
+        status = 'censored';
+        reason = reason || bnd.why;
+      } else {
+        const o = getPwt(s.id, tp.key);
+        const dv = (o && typeof o === 'object') ? o.pwt : o;
+        if (dv == null){ val = ''; status = 'missing'; }
+        else { val = Number(dv.toFixed(3)); status = 'ok'; }
+      }
+    } else {
+      if (String(c.v).trim() === '' && !m.required) continue;
+      val = c.v;
+      const v = validateCell(s.id, tp.key, m.key);
+      status = v.level==='bad'?'error':v.level==='warn'?'query-open'
+             :v.level==='ok'?(v.code==='soft-acked'?'query-resolved':'ok')
+             :v.level==='missing'?'missing':'empty';
+    }
+    lines.push([s.id, s.grp||'', s.wt==null||s.wt===''?'':s.wt,
+                tp.key, m.key, m.label, val, m.unit||'', status, reason,
+                state.meta.operator, at, state.meta.protocol,
+                state.meta.date||'', state.meta.notes||'', state.meta.device||''].map(csvCell).join(','));
+  }
+  // 网站导入的权威值（DTU 工具输出）—— 单独成行，避免与面板派生值混淆
+  for (const s of state.subjects) for (const tp of tpSeq()){
+    const wk = cellKey(s.id, tp.key, 'pwt');
+    const wi = state.webImports && state.webImports[wk];
+    if (!wi || !wi.threshold) continue;
+    const webNum = Number(wi.threshold);
+    // ★ 列序必须与主循环的表头一致（subject, group, weight_g, timepoint, metric, label,
+    //   value, unit, status, reason, operator, recorded_at, protocol, date, notes, device）
+    lines.push([s.id, s.grp||'', s.wt==null||s.wt===''?'':s.wt,
+                tp.key, 'pwt_web', '50% PWT（网站权威）',
+                isNaN(webNum) ? wi.threshold : webNum, 'g',
+                isNaN(webNum) ? 'censored' : 'ok', '',
+                state.meta.operator, wi.importedAt || '', state.meta.protocol,
+                state.meta.date||'', '', state.meta.device||''
+               ].map(csvCell).join(','));
+  }
+  for (const s of state.subjects){
+    const c = findCell(cellKey(s.id, '_row', 'note'));
+    if (String(c.v).trim() === '') continue;
+    lines.push([s.id, s.grp||'', s.wt==null||s.wt===''?'':s.wt,
+                '_row', 'note', '行备注', c.v, '', 'ok', '', state.meta.operator, c.at||'',
+                state.meta.protocol, state.meta.date||'', state.meta.notes||'', state.meta.device||''].map(csvCell).join(','));
+  }
+  return lines.join('\n');
+}
+
+function toJson(){
+  // ★ 两个关键点（都是踩过的坑）：
+  //  ① 必须带上 state 的**全部**顶层字段。早前只导出 6 个，漏了
+  //     webImports（网站权威值）/ webArchive（网站原始 CSV）/
+  //     timepointTimes（实测钟点）/ tpOrder（时间点顺序）→ 备份无法完整还原。
+  //  ② 输出必须是 {savedAt, tps, state} 三段式，与 save()/applyDraft() 期望的
+  //     结构一致 —— 否则导出的 JSON **无法直接再导入面板**（applyDraft 读
+  //     parsed.state，而扁平格式会把 state 内容摊在顶层，读不到）。
+  const savedAt = new Date().toISOString();
+  const full = Object.assign({}, state, { schemaVersion: SCHEMA.version });
+  return JSON.stringify({
+    savedAt,
+    tps: SCHEMA.timepoints,
+    state: full,
+  }, null, 2);
+}
+
+function toEntryPy(){
+  const out = [];
+  out.push(`# ── ${state.meta.protocol || '未命名批次'} · Von Frey 录入（${state.meta.date || '日期待补'} · 操作者：${state.meta.operator || '待填'}）──`);
+  out.push(`# 替换 exports/entry_data.py 中 MICE 列表后跑：`);
+  // 测试频率风险（P0-5）：把给药后密度写进注释，提醒下游/审稿人注意诱导敏化
+  const _fr = frequencyRisk();
+  if (_fr.n >= 2){
+    const _ints = (_fr.intervals || []).map(x => Math.round(x)).join('/');
+    out.push(`# ⚠ 测试频率：给药后 ${_fr.n} 个时间点，间隔 ${_ints} min，跨 ${_fr.spanHours.toFixed(1)} h` +
+             `（${_fr.measured ? '实测钟点' : '名义小时'}）。` +
+             (_fr.highRisk
+               ? `超过文献安全线（每天 ≤2 次；Garcia 2026 每小时 1 次即为危害组）——须设频率对照组或在论文报告。`
+               : `在安全范围内。`));
+  }
+  out.push(`#   format_entry_sheet.py → calculate_pwt.py → add_results_sheet.py → add_qc_sheet.py`);
+  out.push(`# 批次备注：${state.meta.notes || '（空）'}`);
+  out.push(`# 时间点：${SCHEMA.timepoints.map(t => t.label).join(' · ')}`);
+  out.push(`MICE = [`);
+  state.subjects.forEach((s, i) => {
+    const tpLines = [];
+    for (const tp of tpSeq()){
+      const seq = String(findCell(cellKey(s.id, tp.key, 'seq')).v || '').toUpperCase().replace(/[^OX]/g,'');
+      const sf = num(findCell(cellKey(s.id, tp.key, 'startForce')).v);
+      if (!seq) continue;
+      const trials = parseTrials(seq, sf !== null ? sf : defaultStartForce(), currentKit().fibers);
+      if (!trials.length) continue;
+      const trialsPy = '[' + trials.map(([g,r]) => `(${g}, '${r}')`).join(', ') + ']';
+      const note = String(findCell(cellKey(s.id, tp.key, 'seq')).reason || '').replace(/'/g, "\\'");
+      tpLines.push(`         ${tp.key}=dict(t='录入', trials=${trialsPy}, seq='${seq}', note='${note}'),`);
+    }
+    if (!tpLines.length) return;
+    const isLast = i === state.subjects.length - 1;
+    out.push(`    dict(sid=${s.sid||i+1}, mid='${s.id}', grp='${s.grp||''}', wt=${num(s.wt) ?? 25.0},`);
+    tpLines.forEach(l => out.push(l));
+    out.push(`    )${isLast ? '' : ','}`);
+  });
+  out.push(`]`);
+  const nonStd = SCHEMA.timepoints.filter(t => !['pre','model','post'].includes(t.key));
+  if (nonStd.length){
+    out.push(`TP = [`);
+    for (const tp of tpSeq()){
+      out.push(`    ('${tp.key}', '${tp.label}'),`);
+    }
+    out.push(`]`);
+  }
+  return out.join('\n');
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ *  6. 批量粘贴（预览 → 确认 → 写入）
+ * ══════════════════════════════════════════════════════════════════════════ */
+let pasteDiff = null;
+
+function parsePaste(text){
+  const lines = text.split(/\n/).map(l => l.trim()).filter(Boolean);
+  if (!lines.length) return { hasHeader:false, rows:[] };
+  const hasHeader = /^(id|编号|subject)\b/i.test(lines[0]) && /timepoint|tp|时间点|seq|序列/i.test(lines[0]);
+  const data = hasHeader ? lines.slice(1) : lines;
+  const sepRE = /\t|,|，/;
+  const rows = [];
+  for (const ln of data){
+    const parts = ln.split(sepRE).map(s => s.trim());
+    if (parts.length < 3) continue;
+    const [id, tp, value, start, ...noteParts] = parts;
+    rows.push({ id, tp, value, start, note: noteParts.join(',').trim() });
+  }
+  return { hasHeader, rows };
+}
+
+function previewPaste(){
+  const text = document.getElementById('pasteArea').value;
+  const { hasHeader, rows } = parsePaste(text);
+  const host = document.getElementById('pastePreview');
+  if (!rows.length){
+    host.style.display = '';
+    host.innerHTML = '<p class="hint" style="margin:0;">未解析到有效行。至少需要 <code class="mono">id,timepoint,seq</code> 三列。</p>';
+    pasteDiff = null;
+    document.getElementById('btnPasteApply').disabled = true;
+    return;
+  }
+  const items = [];
+  const seenInPaste = new Set();        // 本批粘贴内出现过的 id|tp
+  const newLower = new Map();           // 本批新建编号的小写形式 → 原编号
+  for (const r of rows){
+    let item = { ...r, kind:'add', msg:'' };
+    const tpExists = SCHEMA.timepoints.some(t => t.key === r.tp);
+    if (!tpExists){ item.kind = 'bad'; item.msg = `未知时间点 "${r.tp}"`; items.push(item); continue; }
+    // 与已有动物比对：精确同名 → 更新；仅大小写不同 → 并入（与 applyPaste 行为一致）
+    const exact = state.subjects.find(s => s.id === r.id);
+    const loose = exact || findSubjectLoose(r.id);
+    if (loose){
+      const cell = findCell(cellKey(loose.id, r.tp, 'seq'));
+      if (cell.v && cell.v !== r.value){ item.kind = 'mod'; item.msg = `覆盖旧值 "${cell.v}"`; }
+      if (!exact) item.msg = (item.msg ? item.msg + '；' : '') + `并入已有动物 "${loose.id}"（大小写不同）`;
+      item.canonicalId = loose.id;
+    } else {
+      const low = String(r.id).toLowerCase();
+      if (newLower.has(low) && newLower.get(low) !== r.id){
+        item.kind = 'bad';
+        item.msg = `本批粘贴内与 "${newLower.get(low)}" 仅大小写不同，会被当成两只不同的鼠`;
+        items.push(item); continue;
+      }
+      if (!newLower.has(low)) newLower.set(low, r.id);
+    }
+    // 同一批粘贴里重复的 (id, tp)：后一行会覆盖前一行
+    const sig = (item.canonicalId || r.id) + '|' + r.tp;
+    if (seenInPaste.has(sig)){
+      item.kind = 'bad';
+      item.msg = '本批粘贴内该动物×时间点重复，后一行会覆盖前一行';
+      items.push(item); continue;
+    }
+    seenInPaste.add(sig);
+    const seq = String(r.value || '').toUpperCase().replace(/[^OX]/g,'');
+    if (!seq){ item.kind = 'bad'; item.msg = '序列为空或全为非 o/x 字符'; items.push(item); continue; }
+    items.push(item);
+  }
+  pasteDiff = items;
+  let html = `<p class="hint" style="margin:0 0 6px 0;">${rows.length} 行待写入。绿=新增 · 蓝=覆盖 · 红=错误。</p>`;
+  html += '<table><tr><th>动作</th><th>动物 ID</th><th>时间点</th><th>序列</th><th>起点</th><th>备注</th><th>说明</th></tr>';
+  for (const it of items){
+    html += `<tr class="${it.kind}"><td>${it.kind==='add'?'新增':it.kind==='mod'?'覆盖':'错误'}</td><td>${esc(it.id)}</td><td>${esc(it.tp)}</td><td><code>${esc(it.value)}</code></td><td>${esc(it.start||'')}</td><td>${esc(it.note||'')}</td><td>${esc(it.msg)}</td></tr>`;
+  }
+  html += '</table>';
+  host.style.display = '';
+  host.innerHTML = html;
+  const badCount = items.filter(i => i.kind === 'bad').length;
+  document.getElementById('btnPasteApply').disabled = badCount > 0;
+}
+
+function applyPaste(){
+  if (!pasteDiff) return;
+  let added = 0, updated = 0;
+  for (const it of pasteDiff){
+    if (it.kind === 'bad') continue;
+    // 宽松匹配（忽略大小写）：粘贴里的 demo-001 并入已有的 DEMO-001，不新建一只
+    let sub = findSubjectLoose(it.id);
+    if (!sub){
+      const sid = state.subjects.length ? Math.max(...state.subjects.map(s => s.sid||0))+1 : 1;
+      const lastGrp = state.subjects.length ? (state.subjects[state.subjects.length-1].grp || '') : '';
+      sub = { sid, id: it.id, grp: lastGrp, wt: 25.0, note: '' };
+      state.subjects.push(sub);
+      audit('add-subject', it.id, '', it.id, '');
+      added++;
+    }
+    const pid = sub.id;   // 统一用面板里的既有编号
+    const seqCell = state.cells[cellKey(pid, it.tp, 'seq')] || { v:'' };
+    const sfCell  = state.cells[cellKey(pid, it.tp, 'startForce')] || { v:'' };
+    const oldSeq = seqCell.v || '';
+    seqCell.v = String(it.value || '').toLowerCase().replace(/[^ox]/g,'');
+    seqCell.at = new Date().toISOString(); seqCell.by = state.meta.operator || '';
+    if (it.start){
+      // ★ P1-11：原来直接写，从不校验。若值不在套件内，
+      //   parseTrials 的 kit.indexOf() 返回 -1 会**静默回退到 defaultStartForce()**，
+      //   于是红框旁边显示着一个"看起来合理"的 PWT，实际是用别的力算的。
+      //   现在：不在套件内 → 该行标 bad、不写入、预览里标红。
+      const kitFibers = currentKit().fibers;
+      const sNum = num(it.start);
+      const inKit = sNum !== null && kitFibers.some(g => Math.abs(g - sNum) < 1e-9);
+      if (!inKit){
+        // 标成错误：回写到预览项里由 previewPaste 展示（此处只阻止写入）
+        it.bad = true; it.msg = `起点力值 ${it.start} 不在当前套件（${kitFibers.join('/')}）`;
+      } else {
+        const oldStart = String(sfCell.v);
+        sfCell.v = String(sNum);
+        if (oldStart !== sfCell.v){
+          audit('edit-cell', cellKey(pid, it.tp, 'startForce'), oldStart, sfCell.v, '批量粘贴写入起点力值');
+        }
+      }
+    }
+    if (oldSeq !== seqCell.v){ audit('edit-cell', cellKey(pid, it.tp, 'seq'), oldSeq, seqCell.v, ''); updated++; }
+    state.cells[cellKey(pid, it.tp, 'seq')] = seqCell;
+    state.cells[cellKey(pid, it.tp, 'startForce')] = sfCell;
+    if (it.note){
+      const noteKey = cellKey(pid, it.tp, 'seq');
+      if (!state.cells[noteKey].reason) state.cells[noteKey].reason = it.note;
+    }
+  }
+  for (const it of pasteDiff){
+    if (it.kind === 'bad') continue;
+    if (!SCHEMA.timepoints.some(t => t.key === it.tp)){
+      SCHEMA.timepoints.push({ key: it.tp, label: it.tp });
+      audit('add-timepoint', it.tp, '', it.tp, '批量粘贴自动添加');
+    }
+  }
+  save(true);
+  renderAll();
+  document.getElementById('pasteArea').value = '';
+  pasteDiff = null;
+  document.getElementById('pastePreview').style.display = 'none';
+  document.getElementById('btnPasteApply').disabled = true;
+  announce(`批量粘贴完成：新增 ${added} 只动物，更新 ${updated} 条记录。`);
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ *  7. 与 DTU/Rigshospitalet 在线工具 联动
+ * ══════════════════════════════════════════════════════════════════════════ */
+function toWebsiteCsv(){
+  // 网站接受的格式：ID, Final Filament, XO Pattern（不区分大小写；逗号/分号都行）
+  // ★ Final Filament 必须是**末次**力值（网站据此倒推），不是本面板记录的起点。
+  const prefix = (state.meta.idPrefix || '').trim();
+  const p = prefix ? prefix + '-' : '';
+  const kit = currentKit().fibers;
+  const head = ['ID', 'Final Filament', 'XO Pattern'];
+  const lines = [head.join(',')];
+  const censoredList = [];   // 删失格清单（网站无法表达，导出后需人工留意）
+  for (const s of state.subjects) for (const tp of tpSeq()){
+    const seqC = findCell(cellKey(s.id, tp.key, 'seq'));
+    const sfC = findCell(cellKey(s.id, tp.key, 'startForce'));
+    const seqRaw = String(seqC.v || '').trim();
+    if (!seqRaw) continue;
+    const seq = String(seqRaw).toUpperCase().replace(/[^OX]/g, '');
+    const startF = effectiveStart(sfC.v);
+    const finalFil = finalForceOf(seq, startF, kit);
+    if (finalFil == null) continue;
+    const id = `${p}${s.id}-${tp.label}`;
+    // ★ P0-4：删失格（全 X / 全 O）不是点估计。原实现把末次力值当普通数字写出去，
+    //   与 toCsv（status=censored）给出**相反语义**，网站会据此算出"看起来正常"的假阈值。
+    //   这里按官网格式写 `<x` / `>x`（Final Filament 列接受这种写法），
+    //   并在末尾追加一列说明，让下游能识别。
+    const bnd = boundaryOutcome(seq, startF, kit);
+    if (bnd){
+      lines.push([id, bnd.text, seq].map(csvCell).join(','));
+      if (!censoredList.length) head.push('Censored');
+      censoredList.push(`${id} = ${bnd.text}（${bnd.why}）`);
+    } else {
+      lines.push([id, finalFil, seq].map(csvCell).join(','));
+    }
+  }
+  if (censoredList.length){
+    // 附在 CSV 末尾，网站解析时会忽略注释行；同时给操作者明确清单
+    lines.push('# 注意：以下格子是无转折删失值（网站无法表示为点估计），其 50% Threshold 仅供参考');
+    for (const c of censoredList) lines.push('# ' + c);
+    setTimeout(() => announce(`导出含 ${censoredList.length} 个删失格（全 X/O 无转折），已用 ${censoredList[0].split(' ')[0]} 形式标记并在文件末尾附清单`), 0);
+  }
+  return lines.join('\n');
+}
+
+/* CSV 行解析：处理引号、转义、逗号/分号 */
+function parseCsvLine(line, sep){
+  const out = [];
+  let cur = '', inQ = false;
+  for (let i = 0; i < line.length; i++){
+    const c = line[i];
+    if (c === '"'){
+      if (inQ && line[i+1] === '"'){ cur += '"'; i++; }
+      else inQ = !inQ;
+    } else if (c === sep && !inQ){
+      out.push(cur); cur = '';
+    } else cur += c;
+  }
+  out.push(cur);
+  return out.map(s => s.trim());
+}
+
+function parseWebsiteCsv(text){
+  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  if (!lines.length) return { sep:',', headers:[], rows:[] };
+  // 探测分隔符：逗号 / 分号 / **制表符**
+  // 制表符是常见输入方式——从 DTU 网站的结果表格直接复制、或从 Excel 粘贴，
+  // 得到的都是制表符分隔。只认逗号分号会让这类数据整批解析失败。
+  let sep = ',';
+  if (lines.length > 1){
+    const sample = lines.slice(1, 6).join('\n');
+    const counts = { '\t': (sample.match(/\t/g)||[]).length,
+                     ',':  (sample.match(/,/g)||[]).length,
+                     ';':  (sample.match(/;/g)||[]).length };
+    // 取出现次数最多的那个；全为 0 时退回逗号
+    sep = Object.keys(counts).reduce((a,b) => counts[b] > counts[a] ? b : a, ',');
+    if (counts[sep] === 0) sep = ',';
+  }
+  // 表头
+  const headers = parseCsvLine(lines[0], sep).map(h => h.toLowerCase().trim());
+  const hasHeader = headers.some(h => /^(id|xo|pattern|final|filament|threshold|k[-_]?value|delta)/i.test(h));
+  const dataLines = hasHeader ? lines.slice(1) : lines;
+  // 归一化列名到内部 key
+  const norm = (h) => h.toLowerCase().replace(/[\s_\-%]+/g, '');
+  const cols = {};
+  for (const h of headers){
+    const n = norm(h);
+    if (n === 'id') cols.id = h;
+    else if (n === 'finalfilament' || n === 'lastfilament' || n === 'filament') cols.final = h;
+    else if (n === 'xopattern' || n === 'pattern' || n === 'xo' || n === 'response') cols.pattern = h;
+    else if (n === '50threshold' || n === 'threshold' || n === '50pctthreshold' || n === 'pwt' || n === '50') cols.threshold = h;
+    else if (n === 'kvalue' || n === 'k') cols.kValue = h;
+    else if (n === 'deltavalue' || n === 'delta') cols.delta = h;
+  }
+  const rows = [];
+  for (const ln of dataLines){
+    const cells = parseCsvLine(ln, sep);
+    const row = { _raw: cells };
+    if (hasHeader){
+      for (const [k, h] of Object.entries(cols)) row[k] = cells[headers.indexOf(h)] || '';
+    } else {
+      // 位置推断：ID, Final Filament, XO Pattern, [50% Threshold], [k-value], [delta]
+      row.id = cells[0] || '';
+      row.final = cells[1] || '';
+      row.pattern = cells[2] || '';
+      row.threshold = cells[3] || '';
+      row.kValue = cells[4] || '';
+      row.delta = cells[5] || '';
+    }
+    rows.push(row);
+  }
+  return { sep, hasHeader, headers, cols, rows };
+}
+
+function webIdToInternal(id){
+  // 把 "PREFIX-ANIMAL-LABEL" 拆开。LABEL 是最后一段。
+  // 已知时间点 label：基础值、造模后、给药后、药效0.5h、药效1h、药效1.5h、药效2h、药效3h
+  const knownLabels = ['基础值', '造模后', '给药后', '药效0.5h', '药效1h', '药效1.5h', '药效2h', '药效3h'];
+  const parts = String(id||'').split('-');
+  let label = parts[parts.length-1];
+  let animal = parts.slice(0, -1).join('-');
+  // 若最后一段不匹配，尝试"倒数第二段 + 最后一段"组合（防止 label 自带 -）
+  if (!knownLabels.includes(label) && parts.length >= 2){
+    const try2 = parts.slice(-2).join('-');
+    if (knownLabels.includes(try2)){
+      label = try2;
+      animal = parts.slice(0, -2).join('-');
+    }
+  }
+  return { prefix: parts[0], animal, label };
+}
+
+/* 网站 CSV 的 ID 尾段（时间点标签）→ 内部 key。
+   ⚠ 曾经的硬编码表漏了"药效2.5h"和"药效3.5h"，导致这两行导入时被误判为"未知时间点"。
+   现在改为**从 SCHEMA.timepoints 动态推导**，用户改任何标签都能自动认。 */
+function internalLabelToKey(label){
+  const L = String(label == null ? '' : label).trim();
+  if (!L) return null;
+  // ① 精确匹配当前 label（覆盖用户的所有改名）
+  for (const t of SCHEMA.timepoints) if (t.label === L) return t.key;
+  // ② 直接就是 key
+  for (const t of SCHEMA.timepoints) if (t.key === L) return t.key;
+  // ③ 归一化：忽略大小写/空白/连接符
+  const norm = (x) => String(x).toLowerCase().replace(/[\s_\-—–·．.]/g, '');
+  const nl = norm(L);
+  for (const t of SCHEMA.timepoints){
+    if (norm(t.label) === nl || norm(t.key) === nl) return t.key;
+  }
+  // ④ 按时间数值匹配："药效2.5h" / "2.5h" / "2.5 h" → 找 hours 或 label 数字相同的时间点
+  const m = L.match(/(\d+(?:\.\d+)?)\s*h/i);
+  if (m){
+    const hrs = parseFloat(m[1]);
+    // 优先按 SCHEMA 里声明的 hours
+    const byHours = SCHEMA.timepoints.find(t => t.hours != null && Math.abs(t.hours - hrs) < 1e-9);
+    if (byHours) return byHours.key;
+    // 再按 label 里的数字
+    for (const t of SCHEMA.timepoints){
+      const mm = String(t.label||'').match(/(\d+(?:\.\d+)?)\s*h/i);
+      if (mm && Math.abs(parseFloat(mm[1]) - hrs) < 1e-9) return t.key;
+    }
+    // 再按 key 里的数字（h2.5 → 2.5）
+    for (const t of SCHEMA.timepoints){
+      const mm = String(t.key||'').match(/(\d+(?:\.\d+)?)/);
+      if (mm && Math.abs(parseFloat(mm[1]) - hrs) < 1e-9) return t.key;
+    }
+  }
+  // ⑤ 旧标签兼容（历史 CSV 里的写法）
+  const legacy = {
+    '造模前':'pre', '基础值':'pre', '基线':'pre', 'baseline':'pre',
+    '造模后':'model', 'post-modeling':'model', 'postmodeling':'model',
+    '给药后':'post', 'post-drug':'post',
+  };
+  if (legacy[L]) return legacy[L];
+  return null;
+}
+/* 当前能被识别的时间点标签（给错误提示用，避免用户不知道该写什么） */
+function recognizedLabels(){
+  return tpSeq().map(t => t.label);
+}
+
+let webImportDiff = null;
+
+/* ── 归档：把结果直接写进项目文件夹（不经过 Downloads）──────────
+   背景：网站下载的 CSV 只会落在 ~/Downloads，容易被清掉/混淆。
+   file:// 下 File System Access API 可用（isSecureContext=true），
+   所以能直接往用户选定的目录写文件；目录句柄存进 IndexedDB 跨会话复用。 */
+const ARCHIVE_DIR_KEY = 'archiveDir';
+
+function archiveStamp(){
+  const d = (state.meta && state.meta.date) || '';
+  if (/^\d{4}-\d{2}-\d{2}$/.test(d)) return d;
+  const n = new Date();
+  const p = (x) => String(x).padStart(2,'0');
+  return `${n.getFullYear()}-${p(n.getMonth()+1)}-${p(n.getDate())}`;
+}
+function archiveBaseName(){
+  const raw = (state.meta && state.meta.protocol || '').trim() || 'vonfrey';
+  return raw.replace(/[^\w\u4e00-\u9fa5.\-]/g, '_');
+}
+/* 归档要写的文件清单：[[文件名, 文本], ...] */
+function archiveFileList(){
+  const base = archiveBaseName(), stamp = archiveStamp();
+  const files = [];
+  const wa = state.webArchive;
+  if (wa && wa.csv) files.push([`${base}_网站原始结果_${stamp}.csv`, wa.csv]);
+  files.push([`${base}_长表_${stamp}.csv`, '﻿' + toCsv()]);
+  files.push([`${base}_网站输入_${stamp}.csv`, '﻿' + toWebsiteCsv()]);
+  files.push([`${base}_state_${stamp}.json`, toJson()]);
+  return files;
+}
+function downloadTextFile(name, text){
+  const blob = new Blob([text], { type: 'text/plain;charset=utf-8' });
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  document.body.appendChild(a);
+  a.click();
+  if (a.remove) a.remove(); else if (a.parentNode) a.parentNode.removeChild(a);
+  setTimeout(() => { try{ URL.revokeObjectURL(a.href); }catch(e){} }, 1500);
+}
+/* 记住的归档目录名（从 IDB 句柄读出）—— 用户必须随时知道文件写到哪了 */
+let _archiveDirName = null;
+async function refreshArchiveDirInfo(){
+  const bar = document.getElementById('archiveBar');
+  const nm = document.getElementById('archiveDirName');
+  const bp = document.getElementById('btnArchivePick');
+  const bo = document.getElementById('btnArchiveOpen');
+  if (!nm) return;
+  let dir = null;
+  try{ dir = await idbGetKey(ARCHIVE_DIR_KEY); }catch(e){ dir = null; }
+  _archiveDirName = dir ? dir.name : null;
+  if (dir){
+    nm.textContent = dir.name;
+    if (bar) bar.className = 'archive-bar set';
+    if (bp) bp.hidden = false;
+    if (bo) bo.hidden = false;
+  } else {
+    nm.textContent = '（尚未设置 · 点「归档到文件夹…」选择）';
+    if (bar) bar.className = 'archive-bar unset';
+    if (bp) bp.hidden = true;
+    if (bo) bo.hidden = true;
+  }
+  renderArchiveStatus();
+}
+function renderArchiveStatus(){
+  const el = document.getElementById('archiveStatus');
+  if (!el) return;
+  const wa = state && state.webArchive;
+  const n = wa ? (wa.csv.match(/\n/g)||[]).length : 0;
+  const dirTxt = _archiveDirName ? `· 目录「${_archiveDirName}」` : '· 未设目录（将走下载）';
+  el.textContent = wa
+    ? `已保全网站原始 CSV（${n} 行）${dirTxt}`
+    : `尚未导入网站 CSV${dirTxt}`;
+  el.style.color = wa ? 'var(--ok)' : 'var(--muted)';
+}
+/* 记住目录句柄；失败必须说出来（之前 catch(e){} 静默吞掉，用户无从得知） */
+async function rememberArchiveDir(dir){
+  try{
+    await idbSetKey(ARCHIVE_DIR_KEY, dir);
+    return true;
+  }catch(e){
+    console.warn('归档目录句柄保存失败', e);
+    return false;
+  }
+}
+/* 主入口：优先写进选定文件夹；无 API 时回退为逐个下载。
+   每一步都用 announce() 报状态 —— 之前所有反馈都写进 .sr 读屏区，
+   视觉用户点完毫无感知，误以为按钮坏了。 */
+async function archiveToFolder(){
+  const files = archiveFileList();
+  if (typeof window.showDirectoryPicker !== 'function'){
+    announce('此浏览器不支持直接写入文件夹，改为下载到 Downloads（请手动移入项目目录）。', true);
+    archiveDownloadAll();
+    return;
+  }
+  if (!files.length){
+    announce('没有可归档的内容。', true);
+    return;
+  }
+  let dir = null;
+  // ① 先试上次记住的目录
+  try{
+    dir = await idbGetKey(ARCHIVE_DIR_KEY);
+  }catch(e){ dir = null; }
+  if (dir){
+    try{
+      let perm = await dir.queryPermission({ mode:'readwrite' });
+      if (perm !== 'granted'){
+        announce('需要重新授权上次选的文件夹「' + dir.name + '」…');
+        perm = await dir.requestPermission({ mode:'readwrite' });
+      }
+      if (perm !== 'granted') dir = null;
+    }catch(e){ dir = null; }   // 句柄失效（目录被移动/删除）→ 重新选
+  }
+  try{
+    // ② 没有可用句柄 → 弹选择框（必须是用户手势内，这里就在 click 里）
+    if (!dir){
+      announce('请选择一个归档文件夹（如项目的 归档/网站导出）…');
+      dir = await window.showDirectoryPicker({ mode:'readwrite', id:'vonfrey-archive' });
+      const kept = await rememberArchiveDir(dir);
+      if (!kept) announce('⚠ 文件已写入，但这个目录没能被记住（下次需重新选）。', true);
+    }
+    // ③ 逐个写入，每个都报进度
+    announce(`正在写入 ${files.length} 个文件到「${dir.name}」…`);
+    const done = [];
+    for (const [name, text] of files){
+      const fh = await dir.getFileHandle(name, { create:true });
+      const w = await fh.createWritable();
+      await w.write(new Blob([text], { type:'text/plain;charset=utf-8' }));
+      await w.close();
+      done.push(name);
+    }
+    audit('archive', dir.name, '', String(files.length) + ' files', '归档到项目文件夹');
+    save(true);
+    await refreshArchiveDirInfo();
+    announce(`✓ 归档完成：${files.length} 个文件已写入「${dir.name}」`, false);
+  }catch(e){
+    if (e && e.name === 'AbortError'){
+      announce('已取消（没选文件夹）。可用「或下载归档副本」直接下载。', true);
+      return;
+    }
+    if (e && e.name === 'SecurityError'){
+      // 常见于非用户手势触发（自动化/脚本调用）；手动点击一般不会遇到
+      announce('浏览器要求由真实点击触发文件夹选择框。请直接手动点「归档到文件夹…」，或用「或下载归档副本」。', true);
+      return;
+    }
+    announce('写文件夹失败：' + (e && e.message ? e.message : String(e)) + '　已改为下载。', true);
+    archiveDownloadAll();
+  }
+}
+/* 尽力取目录名/路径：FileSystemDirectoryHandle 只有 name，没有完整路径。
+   这里返回可读形式（目录名 + 提示），供复制到访达使用。 */
+async function probeDirPath(dir){
+  return dir && dir.name ? dir.name : '';
+}
+
+/* 换一个归档目录（只改设置，不写文件） */
+async function pickArchiveDir(){
+  if (typeof window.showDirectoryPicker !== 'function'){
+    announce('此浏览器不支持选择文件夹，请用「或下载归档副本」。', true);
+    return;
+  }
+  try{
+    const dir = await window.showDirectoryPicker({ mode:'readwrite', id:'vonfrey-archive' });
+    const kept = await rememberArchiveDir(dir);
+    await refreshArchiveDirInfo();
+    announce(kept
+      ? `归档目录已改为「${dir.name}」。点「归档到文件夹…」即可写入。`
+      : `已选「${dir.name}」，但没能记住（点归档时会再问一次）。`, !kept);
+  }catch(e){
+    if (e && e.name === 'AbortError') announce('已取消选择。', true);
+    else announce('选择文件夹失败：' + (e && e.message ? e.message : e), true);
+  }
+}
+/* 打开归档目录：file:// 下无法调起访达，改为复制目录名 */
+async function openArchiveDir(){
+  let dir = null;
+  try{ dir = await idbGetKey(ARCHIVE_DIR_KEY); }catch(e){}
+  if (!dir){ announce('尚未设置归档目录，请先点「归档到文件夹…」。', true); return; }
+  const p = await probeDirPath(dir);
+  copyTextToClipboard(p, `已复制「${p}」——在访达按 ⇧⌘G 用它搜索。`);
+}
+
+function archiveDownloadAll(){
+  const files = archiveFileList();
+  if (!files.length){ announce('没有可归档的内容。', true); return; }
+  // 逐个下载：浏览器会拦截连续多次自动下载，间隔开更稳
+  files.forEach(([name, text], i) => {
+    setTimeout(() => downloadTextFile(name, text), i * 350);
+  });
+  announce(`正在下载 ${files.length} 个文件到 Downloads，请稍候后手动移入项目文件夹。`);
+  setTimeout(() => announce(`已发出 ${files.length} 个下载。若浏览器拦截，请允许本站下载后重试。`), files.length * 350 + 900);
+}
+
+function previewWebImport(){
+  const text = document.getElementById('webPasteArea').value;
+  if (!text.trim()){ alert('请先粘贴 CSV 内容。'); return; }
+  const parsed = parseWebsiteCsv(text);
+  const items = [];
+  for (const r of parsed.rows){
+    if (!r.id || !r.pattern){ items.push({ id:r.id, kind:'bad', msg:'ID 或序列缺失' }); continue; }
+    const parsedId = webIdToInternal(r.id);
+    const tpKey = internalLabelToKey(parsedId.label);
+    if (!tpKey || !SCHEMA.timepoints.some(t => t.key === tpKey)){
+      items.push({ id:r.id, kind:'bad',
+        msg:`认不出时间点标签「${parsedId.label}」。当前面板认识这些：${recognizedLabels().join(' / ')}`,
+        animal: parsedId.animal, label: parsedId.label });
+      continue;
+    }
+    if (!state.subjects.some(s => s.id === parsedId.animal)){
+      items.push({ id:r.id, kind:'add', msg:`将创建新动物 "${parsedId.animal}"`, animal: parsedId.animal, tpKey, row: r });
+      continue;
+    }
+    items.push({ id:r.id, kind:'mod', animal: parsedId.animal, tpKey, row: r });
+  }
+  webImportDiff = items;
+  let html = `<p class="hint" style="margin:0 0 6px 0;">共 ${items.length} 行。绿=新建动物 · 蓝=覆盖已有 · 红=错误（跳过）。</p>`;
+  html += '<table><tr><th>动作</th><th>网站 ID</th><th>→ 动物</th><th>→ 时间点</th><th>Final</th><th>XO</th><th>50% Thr</th><th>k</th><th>δ</th><th>说明</th></tr>';
+  for (const it of items){
+    const cls = it.kind === 'add' ? 'add' : it.kind === 'mod' ? 'mod' : 'bad';
+    const action = it.kind==='add'?'新建':it.kind==='mod'?'覆盖':'错误';
+    html += `<tr class="${cls}"><td>${action}</td><td>${esc(it.id)}</td><td>${esc(it.animal||'')}</td><td>${esc(it.tpKey||'')}</td>` +
+            `<td>${esc(it.row?.final||'')}</td><td>${esc(it.row?.pattern||'')}</td>` +
+            `<td>${esc(it.row?.threshold||'')}</td><td>${esc(it.row?.kValue||'')}</td><td>${esc(it.row?.delta||'')}</td>` +
+            `<td>${esc(it.msg||'')}</td></tr>`;
+  }
+  html += '</table>';
+  const host = document.getElementById('webImportPreview');
+  host.style.display = '';
+  host.innerHTML = html;
+  const badCount = items.filter(i => i.kind === 'bad').length;
+  document.getElementById('btnApplyWebImport').disabled = badCount > 0;
+}
+
+function applyWebImport(){
+  if (!webImportDiff) return;
+  let added = 0, updated = 0;
+  for (const it of webImportDiff){
+    if (it.kind === 'bad') continue;
+    // 宽松匹配：网站 CSV 里的 demo-001 应当并入面板里已有的 DEMO-001，而不是新建一只
+    let sub = findSubjectLoose(it.animal);
+    if (!sub){
+      const sid = state.subjects.length ? Math.max(...state.subjects.map(s=>s.sid||0))+1 : 1;
+      const lastGrp = state.subjects.length ? (state.subjects[state.subjects.length-1].grp || '') : '';
+      sub = { sid, id: it.animal, grp: lastGrp, wt: 25.0, note: '' };
+      state.subjects.push(sub);
+      audit('add-subject', it.animal, '', it.animal, '网站 CSV 自动创建');
+      added++;
+    } else if (sub.id !== it.animal){
+      audit('web-import-match', it.animal, it.animal, sub.id, '大小写不同，并入已有动物');
+    }
+    const animalId = sub.id;   // 统一用面板里既有的编号，避免出现仅大小写不同的两只鼠
+    // 写入 seq + startForce（如果网站有 final / pattern）
+    if (it.row.pattern){
+      const seqCell = state.cells[cellKey(animalId, it.tpKey, 'seq')] || { v:'' };
+      seqCell.v = String(it.row.pattern).toLowerCase().replace(/[^ox]/g,'');
+      seqCell.at = new Date().toISOString(); seqCell.by = state.meta.operator || '';
+      state.cells[cellKey(animalId, it.tpKey, 'seq')] = seqCell;
+    }
+    if (it.row.final){
+      // 网站 CSV 给的是**末次**力值，本面板存的是**起点** —— 必须倒推换算，
+      // 否则直接把 0.07 当起点存进去，整条曲线都会错位。
+      const kit = currentKit().fibers;
+      const pat = String(it.row.pattern || '').toUpperCase().replace(/[^OX]/g,'');
+      const startF = pat ? startForceFromFinal(pat, it.row.final, kit) : num(it.row.final);
+      const sfCell = state.cells[cellKey(animalId, it.tpKey, 'startForce')] || { v:'' };
+      if (startF == null) { /* 末次力值不在套件内，跳过，不猜 */ }
+      else if (String(sfCell.v).trim() === ''){
+        // 该格还没记起点 → 用倒推值补上
+        sfCell.v = String(startF);
+        sfCell.at = new Date().toISOString(); sfCell.by = state.meta.operator || '';
+        audit('web-import-anchor', cellKey(animalId, it.tpKey, 'startForce'),
+              '', String(startF), `网站 Final Filament=${it.row.final} 按序列倒推得起点 ${startF} g（原本为空，已补）`);
+        state.cells[cellKey(animalId, it.tpKey, 'startForce')] = sfCell;
+      }
+      else {
+        // ★ 已有起点 → **不覆盖**。
+        //   理由：力值链在边界夹紧时"起点→末次"不可逆（多个起点映射到同一末次），
+        //   倒推得到的起点可能与原始记录不同（实测夹紧案例 11/30 不一致）。
+        //   原始记录是实验事实，优先级高于从末次反推的估计值。
+        const oldStart = Number(sfCell.v);
+        if (kit.includes(oldStart) && pat && traceClamped(pat, oldStart, kit)){
+          const fromOld = finalForceOf(pat, oldStart, kit);
+          audit('web-import-anchor-keep', cellKey(animalId, it.tpKey, 'startForce'),
+                String(oldStart), String(oldStart),
+                `保持原起点 ${oldStart} g：按此起点重算末次为 ${fromOld} g，与网站给的 ${it.row.final} 差异源于边界夹紧（反推不可逆），以原始记录为准`);
+        }
+        else if (Math.abs(oldStart - Number(startF)) > 1e-9){
+          audit('web-import-anchor-diff', cellKey(animalId, it.tpKey, 'startForce'),
+                String(oldStart), String(startF),
+                `网站 Final Filament=${it.row.final} 倒推得起点 ${startF} g，与已记录 ${oldStart} g 不一致；**保留原值**，请人工核对`);
+        }
+      }
+    }
+    // 写入 webImports（PWT/50% Threshold + k + δ）
+    if (it.row.threshold){
+      const k = cellKey(animalId, it.tpKey, 'pwt');
+      const old = state.webImports[k];
+      state.webImports[k] = {
+        threshold: it.row.threshold,
+        kValue: it.row.kValue || '',
+        delta: it.row.delta || '',
+        importedAt: new Date().toISOString(),
+        id: it.id,
+      };
+      if (!old){ audit('web-import', k, '', it.row.threshold, `网站 50% Threshold (k=${it.row.kValue||'?'}, δ=${it.row.delta||'?'})`); updated++; }
+    }
+  }
+  // ★ 保全网站原始 CSV 全文：网站下载的文件只落在 ~/Downloads，容易被清掉；
+  //   把原文存进草稿，导出 state.json 时一并带出，就不会再丢。
+  try{
+    const raw = (document.getElementById('webPasteArea') || {}).value || '';
+    if (raw.trim()){
+      state.webArchive = { csv: raw, at: new Date().toISOString(), n: added + updated };
+      audit('web-archive-keep', 'webArchive', '', String(raw.length) + ' chars',
+            '保留网站原始 CSV 全文，防止 Downloads 文件丢失');
+    }
+  }catch(e){}
+  save(true); renderAll();
+  document.getElementById('webPasteArea').value = '';
+  webImportDiff = null;
+  document.getElementById('webImportPreview').style.display = 'none';
+  document.getElementById('btnApplyWebImport').disabled = true;
+  announce(`网站 CSV 导入完成：新建 ${added} 只动物 · 更新/覆盖 ${updated} 条 PWT。`);
+  renderWebCompare();
+}
+
+function renderWebCompare(){
+  const host = document.getElementById('webCompare');
+  const items = Object.entries(state.webImports || {});
+  if (!items.length){
+    host.style.display = 'none'; host.innerHTML = ''; return;
+  }
+  host.style.display = '';
+  // 逐条算差 + 相对差 + 是否删失格
+  const rows = [];
+  for (const [k, v] of items){
+    const parts = k.split('|');
+    const sub = parts[0], tp = parts[1];
+    const mle = pwtValue(getPwt(sub, tp));
+    const webNum = (v.threshold === '' || v.threshold == null) ? null : Number(v.threshold);
+    const isCensored = isNaN(webNum);           // "<0.01" 这类区间值
+    const rel = (mle !== null && webNum > 0) ? (mle / webNum - 1) * 100 : null;
+    rows.push({ sub, tp, mle, web: v.threshold, webNum, isCensored, rel, id: v.id || '' });
+  }
+  // 统计（仅数值、且派生值存在的）
+  const numRows = rows.filter(r => r.mle !== null && r.webNum > 0);
+  let statHtml = '';
+  if (numRows.length){
+    const rels = numRows.map(r => r.rel).sort((a,b)=>a-b);
+    const med = rels.length % 2 ? rels[(rels.length-1)/2]
+            : (rels[rels.length/2-1] + rels[rels.length/2]) / 2;
+    const within = (tol) => numRows.filter(r => Math.abs(r.rel) <= tol).length;
+    const meanRel = rels.reduce((a,b)=>a+b,0) / rels.length;
+    const maxAbs = numRows.reduce((m,r) => Math.abs(r.rel) > Math.abs(m) ? r.rel : m, 0);
+    statHtml =
+      `<p class="hint" style="margin:0 0 8px 0;">` +
+      `共 <b>${rows.length}</b> 条网站导入值；其中 <b>${numRows.length}</b> 条可与本工具派生值直接比较，` +
+      `相对差 中位 <b>${med >= 0 ? '+' : ''}${med.toFixed(1)}%</b>、均值 ${meanRel >= 0 ? '+' : ''}${meanRel.toFixed(1)}%、` +
+      `最大绝对偏差 ${maxAbs >= 0 ? '+' : ''}${maxAbs.toFixed(1)}%。` +
+      `一致度：±5% 内 <b>${within(5)}</b> 条 · ±10% 内 <b>${within(10)}</b> 条 · ±20% 内 <b>${within(20)}</b> 条。` +
+      `<br><span class="hint" style="margin:2px 0 0 0;">` +
+      `本工具用「常数 σ 的 probit MLE」做即时反馈，网站用「Exact δ」；两者本就存在系统性差异。` +
+      `<b>最终报告数值一律以网站列为准（绿色斜体）</b>，此表只用于核对录入是否有误。</span></p>`;
+  }
+  let html = statHtml;
+  html += '<table><tr><th>动物</th><th>时间点</th><th>派生 MLE</th><th>网站（权威）</th><th>绝对差</th><th>相对差</th><th>网站 ID</th></tr>';
+  for (const r of rows){
+    const tpLabel = esc(SCHEMA.timepoints.find(t=>t.key===r.tp)?.label || r.tp);
+    const mleS = r.mle !== null ? r.mle.toFixed(3) : '—';
+    let diffS = '—', relS = '—', relColor = 'var(--muted)';
+    if (r.mle !== null && r.webNum > 0){
+      const d = r.mle - r.webNum;
+      diffS = (d >= 0 ? '+' : '') + d.toFixed(3);
+      relS = (r.rel >= 0 ? '+' : '') + r.rel.toFixed(1) + '%';
+      const a = Math.abs(r.rel);
+      relColor = a <= 5 ? 'var(--ok)' : (a <= 15 ? 'var(--warn)' : 'var(--bad, #a33)');
+    } else if (r.isCensored){
+      diffS = '删失'; relS = '—'; relColor = 'var(--muted)';
+    }
+    const webCell = r.isCensored
+      ? `<b style="color:var(--warn);font-style:italic;">${esc(r.web)}</b>`
+      : `<b style="color:var(--ok);font-style:italic;">${esc(r.web)}</b>`;
+    html += `<tr><td>${esc(r.sub)}</td><td>${tpLabel}</td><td>${mleS}</td><td>${webCell}</td><td>${diffS}</td><td style="color:${relColor};font-weight:600;">${relS}</td><td><code>${esc(r.id)}</code></td></tr>`;
+  }
+  html += '</table>';
+  host.innerHTML = html;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ *  8. Demo 载入
+ * ══════════════════════════════════════════════════════════════════════════ */
+function loadDemo(){
+  // Synthetic software fixtures only; no laboratory observations.
+  const demo = [
+  {
+    "mid": "DEMO-001",
+    "grp": "Example-A",
+    "wt": 25.0,
+    "data": {
+      "pre": [
+        "oxoxox",
+        0.16
+      ],
+      "model": [
+        "ooxoxo",
+        0.16
+      ]
+    }
+  },
+  {
+    "mid": "DEMO-002",
+    "grp": "Example-B",
+    "wt": 25.0,
+    "data": {
+      "pre": [
+        "xoxoxo",
+        0.4
+      ],
+      "model": [
+        "oxxoox",
+        0.4
+      ]
+    }
+  },
+  {
+    "mid": "DEMO-003",
+    "grp": "Boundary-example",
+    "wt": 25.0,
+    "data": {
+      "pre": [
+        "xxxxxx",
+        0.16
+      ]
+    }
+  },
+  {
+    "mid": "DEMO-004",
+    "grp": "Boundary-example",
+    "wt": 25.0,
+    "data": {
+      "pre": [
+        "oooooo",
+        0.6
+      ]
+    }
+  }
+];
+  state.webImports = {};
+  state.webArchive = null;
+  state.meta.protocol = "SYNTHETIC-DEMO";
+  state.meta.operator = "synthetic-demo";
+  state.meta.kit = "standard";
+  state.meta.defaultStart = 0.16;
+  state.meta.idPrefix = "";
+  state.meta.allowOverride = "off";
+  state.finalized = false;
+  state.meta.notes = "Synthetic software fixtures; no experimental observations.";
+  state.subjects = [];
+  state.cells = {};
+  demo.forEach((d, i) => {
+    state.subjects.push({ sid: i+2, id: d.mid, grp: d.grp, wt: d.wt, note: '' });
+    for (const [tp, val] of Object.entries(d.data)){
+      const seq = val[0], sf = val[1], note = val[2] || '';
+      const k = cellKey(d.mid, tp, 'seq');
+      const ksf = cellKey(d.mid, tp, 'startForce');
+      state.cells[k] = { v: seq, reason: note, ack:false, at: new Date().toISOString(), by:'(synthetic-demo)' };
+      state.cells[ksf] = { v: String(sf), reason:'', ack:false, at: new Date().toISOString(), by:'(synthetic-demo)' };
+    }
+  });
+  audit('import-demo', `${demo.length} 只模拟动物`, '', '已载入', 'Synthetic fixtures; not experimental observations');
+  save(true);
+  renderAll();
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ *  8. 事件绑定
+ * ══════════════════════════════════════════════════════════════════════════ */
+function bindMeta(){
+  const map = { 'm-protocol':'protocol', 'm-operator':'operator', 'm-device':'device', 'm-date':'date', 'm-notes':'notes', 'm-kit':'kit', 'm-allowOverride':'allowOverride', 'm-idPrefix':'idPrefix', 'm-defaultStart':'defaultStart' };
+  for (const [id, key] of Object.entries(map)){
+    const el = document.getElementById(id);
+    if (!el) continue;
+    el.addEventListener('input', () => {
+      const old = state.meta[key];
+      const val = el.value;
+      // defaultStart 是数值，且决定所有"起点留空"格子的 PWT
+      state.meta[key] = (key === 'defaultStart')
+        ? (num(val) !== null ? num(val) : 0.16)
+        : val;
+      markPending('meta|'+key, old, val);
+      dirty = true; save();
+      if (key === 'defaultStart' || key === 'kit'){
+        renderKitHint(); renderBody(); renderChecks(); renderExport();
+      }
+    });
+    el.addEventListener('change', () => {
+      const p = pending['meta|'+key];
+      if (p && p.from !== p.to) audit('edit-meta', key, p.from, p.to, '');
+      delete pending['meta|'+key];
+    });
+  }
+}
+
+function bindGrid(){
+  const tb = document.getElementById('gridBody');
+
+  tb.addEventListener('click', e => {
+    const del = e.target.closest('[data-delsub]');
+    if (del){
+      const idx = +del.dataset.delsub;
+      const m = state.subjects[idx];
+      if (!confirm(`删除 ${m.id} 的全部数据？此操作可撤销。`)) return;
+      snapshot();
+      const oldCells = Object.fromEntries(Object.entries(state.cells).filter(([k])=>k.startsWith(m.id+'|')));
+      const oldWeb = Object.fromEntries(Object.entries(state.webImports||{}).filter(([k])=>k.startsWith(m.id+'|')));
+      const old = JSON.stringify({ id:m.id, cells: oldCells, webImports: oldWeb });
+      state.subjects.splice(idx, 1);
+      for (const k of Object.keys(state.cells)) if (k.startsWith(m.id+'|')) delete state.cells[k];
+      // ★ P1-8：webImports 也必须一起清。原实现只删 cells，留下孤儿行 ——
+      //   renderWebCompare 会显示"没有对应动物的网站值"，
+      //   日后新建同名动物时这些陈旧数据还会突然"复活"。
+      let nWeb = 0;
+      for (const k of Object.keys(state.webImports||{})){
+        if (k.startsWith(m.id+'|')){ delete state.webImports[k]; nWeb++; }
+      }
+      audit('del-subject', m.id, old, '', nWeb ? `已删除 cells 与 ${nWeb} 条网站导入值` : '已删除 cells');
+      save(true); renderAll();
+    }
+  });
+
+  tb.addEventListener('input', e => {
+    const t = e.target;
+    if (t.dataset.subid !== undefined){
+      // 边打字边只更新 state.id；cells 迁移与重命名延后到 blur。
+      // 整表重建放 input 里会让输入框被销毁、焦点丢失（打不出第二个字母）。
+      const idx = +t.dataset.subid;
+      const raw = t.value.trim();
+      // 与其它鼠重名、或含非法字符时立即打回，不让脏值进入 state
+      const _idProb = subjectIdProblem(raw);
+      if (raw && subjectIdTaken(raw, idx)){
+        state.subjects[idx].id = raw;
+        t.classList.add('bad');
+        t.title = '此编号已被另一只动物使用';
+        announce('动物编号重复，已阻止。两只用同一编号会让数据互相覆盖。');
+      } else if (raw && _idProb){
+        // ★ P2-1：含 | 会让内部键错位、CSV 被破坏，必须挡住
+        state.subjects[idx].id = raw;
+        t.classList.add('bad');
+        t.title = _idProb;
+        announce('动物编号非法：' + _idProb + '（已阻止保存该值）');
+      } else {
+        state.subjects[idx].id = raw || ('M' + (idx+1));
+        t.classList.remove('bad');
+        t.title = '';
+      }
+      dirty = true; save();
+      return;
+    }
+    if (t.dataset.grp !== undefined){
+      // 边打字只更新 state；分隔条在 blur 时重排（否则每个按键重建表体，组名打不完）
+      state.subjects[+t.dataset.grp].grp = t.value;
+      dirty = true; save(); renderChecks(); renderExport();
+      return;
+    }
+    if (t.dataset.wt !== undefined){
+      state.subjects[+t.dataset.wt].wt = num(t.value);
+      dirty = true; save(); renderChecks(); renderExport();
+      return;
+    }
+    if (t.dataset.rnote !== undefined){
+      const idx = +t.dataset.rnote;
+      const sid = state.subjects[idx].id;
+      const k = cellKey(sid, '_row', 'note');
+      const old = findCell(k).v;
+      const c = getCell(sid, '_row', 'note');
+      snapshotFor(k);            // ★ P1-9：同样先快照
+      c.v = t.value; c.at = new Date().toISOString(); c.by = state.meta.operator || '';
+      markPending(k, old, t.value);
+      dirty = true; save();
+      return;
+    }
+    if (t.dataset.key){
+      const key = t.dataset.key;
+      const c = getCell(...key.split('|'));
+      const old = c.v;
+      // ★ P1-9：快照必须在写值**之前**。原来顺序是 先 c.v=新值 再 snapshotFor，
+      //   于是 undoStack 顶格 = 已含新值的状态，undo() 恢复出与现状相同的对象 ——
+      //   **每格首次编辑按 Ctrl+Z 什么都没发生**。
+      snapshotFor(key);
+      c.v = t.value; c.at = new Date().toISOString(); c.by = state.meta.operator || '';
+      markPending(key, old, t.value);
+      dirty = true; save();
+      const [sid, tp] = key.split('|');
+      updateCellPreview(sid, tp);
+      renderChecks(); renderExport();
+      return;
+    }
+    if (t.dataset.ov){
+      const key = t.dataset.ov;
+      const c = getCell(...key.split('|'));
+      const old = c.v;
+      snapshotFor(key);          // ★ P1-9：同 cell 块，先快照
+      c.v = t.value; c.at = new Date().toISOString(); c.by = state.meta.operator || '';
+      c.override = true;
+      markPending(key, old, t.value);
+      dirty = true; save();
+      const [sid, tp] = key.split('|');
+      updateCellPreview(sid, tp);
+      renderChecks(); renderExport();
+      return;
+    }
+  });
+
+  tb.addEventListener('change', e => {
+    const t = e.target;
+    if (t.dataset.key){
+      const key = t.dataset.key;
+      if (commitPending(key)) save(true);
+      const [sid, tp] = key.split('|');
+      updateCellPreview(sid, tp);
+      renderChecks(); renderExport();
+    }
+  });
+
+  tb.addEventListener('blur', e => {
+    const t = e.target;
+    if (t.dataset.key){
+      const key = t.dataset.key;
+      if (commitPending(key)) save(true);
+    }
+    if (t.dataset.rnote !== undefined){
+      const key = cellKey(state.subjects[+t.dataset.rnote].id, '_row', 'note');
+      if (commitPending(key)) save(true);
+    }
+    // 动物组别失焦：按新组别重排组分隔条。
+    // 两道保护：
+    //  ① 只有"相邻分组序列"真的变了才重排 —— 单纯改个组名不该重建整张表；
+    //  ② 延到当前点击落定后再重排，并恢复焦点 —— 否则你从"组别"格点进旁边
+    //     "序列"格时，刚点中的格子会被重建掉，等于白点一下。
+    if (t.dataset.grp !== undefined){
+      const before = groupSignature();
+      setTimeout(() => {
+        if (groupSignature() === before) return;
+        const active = document.activeElement;
+        const aKey = (active && active.dataset) ? active.dataset.key : null;
+        const aSub = (active && active.dataset) ? active.dataset.subid : undefined;
+        const aGrp = (active && active.dataset) ? active.dataset.grp : undefined;
+        renderBody();
+        if (aKey){
+          const el = document.getElementById('in-' + cssId(aKey));
+          if (el){ el.focus(); }
+        } else if (aSub !== undefined){
+          const el = document.querySelector('[data-subid="' + aSub + '"]');
+          if (el) el.focus();
+        } else if (aGrp !== undefined){
+          const el = document.querySelector('[data-grp="' + aGrp + '"]');
+          if (el) el.focus();
+        }
+      }, 0);
+    }
+    // 动物编号失焦：把该鼠遗留的 cells 从旧 key 迁到新 key。
+    // 关键是**只迁移这一只鼠的孤儿 cells**，不能扫全表 —— 否则先改的第 2 只鼠
+    // 会把第 1 只鼠还没来得及迁移的 cells 也卷走。
+    if (t.dataset.subid !== undefined){
+      const idx = +t.dataset.subid;
+      const cur = state.subjects[idx].id;
+      if (!cur || subjectIdTaken(cur, idx)){
+        // 重名：撤销这次改名，退回可用值
+        state.subjects[idx].id = 'M' + (idx + 1);
+        t.classList.remove('bad');
+        announce('动物编号重复，已撤销该次改名。');
+        renderBody();
+        return;
+      }
+      // 该鼠自己的孤儿 cells：key 头既不等于新 id，也不对应任何现存鼠
+      const otherIds = new Set(state.subjects.filter((_, i) => i !== idx).map(s => s.id));
+      const orphans = Object.keys(state.cells).filter(k => {
+        const head = k.split('|')[0];
+        return head !== cur && !otherIds.has(head);
+      });
+      if (orphans.length){
+        snapshot();
+        for (const k of orphans){
+          const parts = k.split('|');
+          const newK = `${cur}|${parts[1]}|${parts[2]}`;
+          if (newK in state.cells) delete state.cells[k];  // 目标已存在则丢弃孤儿，不覆盖
+          else { state.cells[newK] = state.cells[k]; delete state.cells[k]; }
+        }
+        audit('edit-subid', cur, `孤儿 cells × ${orphans.length}`, `迁移到 ${cur}`, '动物编号修改后迁移该鼠 cells');
+        renderBody();
+      } else {
+        t.classList.remove('bad');
+        t.title = '';
+      }
+    }
+  }, true);
+
+  tb.addEventListener('keydown', e => {
+    const t = e.target;
+    if (!t.dataset || !t.dataset.key) return;
+    const inp = t;
+    if (e.key === 'Enter'){
+      e.preventDefault();
+      const cell = inp.closest('.tp');
+      const next = cell && cell.parentElement && cell.parentElement.nextElementSibling;
+      if (next){
+        const ni = next.querySelector('.seq-inp');
+        if (ni){ ni.focus(); ni.select && ni.select(); }
+      } else {
+        const tr = inp.closest('tr');
+        const ntr = tr && tr.nextElementSibling;
+        if (ntr){
+          const ni = ntr.querySelector('.seq-inp');
+          if (ni){ ni.focus(); ni.select && ni.select(); }
+        }
+      }
+    } else if (e.key === 'ArrowDown' && (inp.selectionStart === inp.value.length)){
+      e.preventDefault();
+      const cell = inp.closest('.tp');
+      const tr = cell.closest('tr');
+      const ntr = tr && tr.nextElementSibling;
+      if (ntr){
+        const ni = ntr.querySelector('.seq-inp');
+        if (ni){ ni.focus(); ni.select && ni.select(); }
+      }
+    } else if (e.key === 'ArrowUp' && (inp.selectionStart === 0)){
+      e.preventDefault();
+      const cell = inp.closest('.tp');
+      const tr = cell.closest('tr');
+      const ptr = tr && tr.previousElementSibling;
+      if (ptr){
+        const ni = ptr.querySelector('.seq-inp');
+        if (ni){ ni.focus(); ni.select && ni.select(); }
+      }
+    }
+  });
+}
+
+function updateCellPreview(sid, tp){
+  const cell = document.querySelector(`[data-tp-cell="${cssId(sid+'|'+tp)}"]`);
+  if (!cell) return;
+  const seqC = findCell(cellKey(sid, tp, 'seq'));
+  const seqV = validateCell(sid, tp, 'seq');
+  const sfV  = validateCell(sid, tp, 'startForce');
+  const trials = getTrials(sid, tp);
+  const pwtObj = (seqV.level === 'ok' && sfV.level === 'ok') ? getPwt(sid, tp) : null;
+  const pwt = pwtValue(pwtObj);
+  const kit = currentKit();
+  const sigma = (kit.LOGS[kit.fibers[kit.fibers.length-1]] - kit.LOGS[kit.fibers[0]]) / (kit.fibers.length-1);
+  // ★ P1-10：无转折（全 X/全 O）要显示删失值，不能显示 MLE 数字。
+  //   原来这里只算 MLE 再无条件覆写 .pwt-val，把 cellBlockHTML 渲染的
+  //   「0.008 ↙取最低」抹成「0.008」→ 同格刷新前后显示不同的数。
+  const seqUsable = seqV.level !== 'bad' && seqV.level !== 'missing' && seqV.level !== 'empty';
+  const bnd = seqUsable ? boundaryOutcome(String(seqC.v||'').toUpperCase().replace(/[^OX]/g,''),
+                                          effectiveStart(findCell(cellKey(sid,tp,'startForce')).v), kit.fibers) : null;
+  // ★ P1-10：k 表守卫必须与 cellBlockHTML 一致（那边有 && !bnd，这边原来没有）
+  const kVal = (pwt !== null && !bnd && trials.length >= 6)
+    ? pwtK(trials.map(t=>t[1]).join(''), trials[trials.length-1][0], kit.LOGS, sigma) : null;
+  const order = ['bad','warn','missing','empty','ok'];
+  const worst = [seqV.level, sfV.level].reduce((a,b) => order.indexOf(a) <= order.indexOf(b) ? a : b, 'ok');
+  const cls = cellClass(worst);
+  const mark = (worst === 'ok' && (pwt !== null || bnd)) ? cellMark('ok') : cellMark(worst);
+
+  cell.className = 'tp ' + cls;
+  const seqVis = cell.querySelector('.seq-vis');
+  if (seqVis) seqVis.innerHTML = seqC.v ? colorizeSeq(seqC.v, trials) : '<span style="color:var(--muted)">— 序列 —</span>';
+  const markEl = cell.querySelector('.mark');
+  if (markEl) markEl.textContent = mark;
+  const pwtRow = cell.querySelector('.pwt-row');
+  const allowOv = state.meta.allowOverride === 'on';
+  if (!allowOv && pwtRow){
+    const pwtEl = pwtRow.querySelector('.pwt-val');
+    if (pwtEl){
+      if (bnd){
+        pwtEl.textContent = bnd.text;
+        pwtEl.style.color = 'var(--warn)';
+        pwtEl.style.fontWeight = '700';
+        pwtEl.title = bnd.why;
+        const mk = document.createElement('span');
+        mk.style.cssText = 'font-size:10px;font-weight:400;opacity:.6;';
+        mk.textContent = ` ${bnd.kind==='min' ? '↙' : '↖'}取${bnd.kind==='min' ? '最低' : '最高'}`;
+        pwtEl.appendChild(mk);
+      } else {
+        // 清掉上一轮可能留下的删失标记
+        const extra = pwtEl.querySelector('span');
+        if (extra) extra.remove();
+        pwtEl.textContent = pwt !== null ? pwt.toFixed(3) : '';
+        pwtEl.style.color = '';
+        pwtEl.style.fontWeight = '';
+        pwtEl.title = '';
+      }
+    }
+  }
+  // 「起点 → 末次」那一行也要跟着重画（原来完全不更新，增量预览后与整表渲染不一致）
+  const rows = cell.querySelectorAll('.pwt-row');
+  if (rows.length >= 2 && rows[1].querySelector('b')){
+    const stVal = rows[1].querySelectorAll('b');
+    if (stVal.length >= 2){
+      stVal[0].textContent = String(effectiveStart(findCell(cellKey(sid,tp,'startForce')).v));
+      const finF = (seqUsable && !bnd) ? finalForceOf(String(seqC.v||'').toUpperCase().replace(/[^OX]/g,''),
+                                     effectiveStart(findCell(cellKey(sid,tp,'startForce')).v), kit.fibers) : null;
+      stVal[1].textContent = (finF != null) ? String(finF) : '—';
+    }
+  }
+  if (pwtRow){
+    const oldK = pwtRow.querySelector('.k-disp');
+    if (oldK) oldK.remove();
+    if (kVal !== null){
+      const kSpan = document.createElement('span');
+      kSpan.className = 'k-disp';
+      kSpan.style.color = 'var(--muted)';
+      kSpan.style.marginLeft = '4px';
+      kSpan.textContent = `· k表 ${kVal.toFixed(2)}`;
+      pwtRow.appendChild(kSpan);
+    }
+  }
+  const errEl = cell.querySelector('.err');
+  if (errEl){
+    const bubbleMsg = (seqV.level==='bad' && seqV.msg) || (sfV.level==='bad' && sfV.msg) || '';
+    errEl.textContent = bubbleMsg;
+  }
+}
+
+function bindButtons(){
+  document.getElementById('btnAddSubject').addEventListener('click', () => {
+    snapshot();
+    const prefix = (document.getElementById('subPrefix').value || 'M').trim();
+    let n = state.subjects.length + 1;
+    while (state.subjects.some(s => s.id === prefix+n)) n++;
+    const sid = state.subjects.length ? Math.max(...state.subjects.map(s=>s.sid||0))+1 : 1;
+    // 组别默认沿用上一只鼠 —— 连加同组动物时不用每条都手填组名
+    const lastGrp = state.subjects.length ? (state.subjects[state.subjects.length-1].grp || '') : '';
+    state.subjects.push({ sid, id: prefix+n, grp: lastGrp, wt: 25.0, note: '' });
+    audit('add-subject', prefix+n, '', prefix+n, '');
+    save(true); renderAll();
+    // 聚焦新行的第一个时间点（不硬编码 'pre'，用户可能删过/改过时间点）
+    const firstTp = tpSeq()[0];
+    if (firstTp){
+      setTimeout(() => {
+        const el = document.querySelector('[data-tp-cell="' + cssId(prefix+n + '|' + firstTp.key) + '"] .seq-inp');
+        if (el) el.focus();
+      }, 30);
+    }
+  });
+  document.getElementById('btnUndo').addEventListener('click', undo);
+  document.getElementById('btnPasteOpen').addEventListener('click', () => {
+    const box = document.getElementById('pasteBox');
+    box.style.display = box.style.display === 'none' ? '' : 'none';
+    if (box.style.display !== 'none') document.getElementById('pasteArea').focus();
+  });
+  document.getElementById('btnPasteClose').addEventListener('click', () => {
+    document.getElementById('pasteBox').style.display = 'none';
+  });
+  document.getElementById('btnPastePreview').addEventListener('click', previewPaste);
+  document.getElementById('btnPasteApply').addEventListener('click', applyPaste);
+  document.getElementById('btnLoadDemo').addEventListener('click', () => {
+    if (!confirm('载入 demo 会覆盖当前录入。继续？')) return;
+    loadDemo();
+  });
+  document.getElementById('btnSetStartAll').addEventListener('click', () => {
+    const def = defaultStartForce();   // ★ P1-7：同上
+    if (!confirm(`把所有 cell 的起点力值统一改为 ${def} g？\n（注意：如果套件选了"扩展"，${def} 不在列表里时不会改）`)) return;
+    snapshot();
+    const kit = currentKit();
+    if (!kit.fibers.includes(def)){
+      alert(`错误：当前套件不含 ${def} g。可选力值：${kit.fibers.join(', ')}`);
+      return;
+    }
+    const old = JSON.stringify(Object.fromEntries(
+      Object.entries(state.cells).filter(([k])=>k.endsWith('|startForce'))
+    ));
+    let n = 0;
+    // ★ 修复：遍历「动物 × 时间点」的每个格子，而不是只遍历 state.cells 里
+    //   已存在的键。原来只改已存在的 startForce 键 —— 但新批次里用户只录了序列、
+    //   还没碰过起点力值，cells 里根本没有 startForce 键 → 循环零命中 → 什么都没改。
+    //   结果按钮点了等于没点，校验仍报「起点力值未录入」。
+    for (const s of state.subjects) for (const tp of tpSeq()){
+      const k = cellKey(s.id, tp.key, 'startForce');
+      const c = findCell(k);              // findCell 不存在的键返回 {v:''}
+      c.v = String(def);
+      c.at = new Date().toISOString();
+      c.by = state.meta.operator || '';
+      state.cells[k] = c;
+      n++;
+    }
+    audit('bulk-set-start', '全部 cell 起点力值', old, String(def) + `（${n} 个 cell）`, `一键设全部起点为 ${def} g`);
+    save(true); renderAll();
+    announce(`已把 ${n} 个 cell 的起点力值设为 ${def} g`);
+  });
+
+  // ── 时间点分组编辑器（事件委托）──
+  const tpHost = document.getElementById('tpEditor');
+  if (tpHost){
+    tpHost.addEventListener('click', e => {
+      const addSub = e.target.closest('[data-add-sub]');
+      if (addSub){ addSubTimepoint(addSub.dataset.addSub); return; }
+      const addGrp = e.target.closest('[data-add-grp]');
+      if (addGrp){ addNewGroup(); return; }
+      const rmGrp = e.target.closest('[data-remove-group]');
+      if (rmGrp){ removeTimepointGroup(rmGrp.dataset.removeGroup); return; }
+      const rm = e.target.closest('[data-remove-tp]');
+      if (rm){ removeSubTimepoint(rm.dataset.removeTp); return; }
+      const mv = e.target.closest('[data-mv]');
+      if (mv && !mv.disabled){ moveTp(mv.dataset.mv, +mv.dataset.dir); return; }
+      const srt = e.target.closest('[data-sort-tp]');
+      if (srt){ sortTpByLabel(); return; }
+    });
+
+    // ── 拖拽排序（HTML5 Drag & Drop）──
+    // 键盘用户用上面的 ◀▶ 按钮（WCAG 2.1.1：不要求必须用鼠标）
+    let dragKey = null;
+    tpHost.addEventListener('dragstart', e => {
+      const kid = e.target.closest('.tp-kid[draggable="true"]');
+      if (!kid) return;
+      dragKey = kid.dataset.tpkey;
+      kid.classList.add('dragging');
+      e.dataTransfer.effectAllowed = 'move';
+      try { e.dataTransfer.setData('text/plain', dragKey); } catch(_){}
+    });
+    tpHost.addEventListener('dragover', e => {
+      if (!dragKey) return;
+      e.preventDefault();
+      e.dataTransfer.dropEffect = 'move';
+      const kid = e.target.closest('.tp-kid[draggable="true"]');
+      tpHost.querySelectorAll('.tp-kid').forEach(k => k.classList.remove('drop-before','drop-after'));
+      if (!kid || kid.dataset.tpkey === dragKey) return;
+      const r = kid.getBoundingClientRect();
+      kid.classList.add(e.clientX < r.left + r.width/2 ? 'drop-before' : 'drop-after');
+    });
+    tpHost.addEventListener('drop', e => {
+      if (!dragKey) return;
+      e.preventDefault();
+      const kid = e.target.closest('.tp-kid[draggable="true"]');
+      const before = kid && kid.classList.contains('drop-before');
+      if (kid && kid.dataset.tpkey !== dragKey){
+        reorderTp(dragKey, kid.dataset.tpkey, before);
+      }
+      cleanupDrag();
+    });
+    tpHost.addEventListener('dragend', cleanupDrag);
+    function cleanupDrag(){
+      tpHost.querySelectorAll('.tp-kid').forEach(k =>
+        k.classList.remove('dragging','drop-before','drop-after'));
+      dragKey = null;
+    }
+    // 把 src 挪到 target 的前面（before）或后面（after）
+    function reorderTp(srcKey, tgtKey, before){
+      const src = SCHEMA.timepoints.find(t => t.key === srcKey);
+      const tgt = SCHEMA.timepoints.find(t => t.key === tgtKey);
+      if (!src || !tgt) return;
+      // 只允许同一分组内互相移动（跨组请改分组归属，避免表头结构错乱）
+      if ((src.group || null) !== (tgt.group || null)){
+        announce('只能在同一个时间点组内调整顺序；跨组移动请改分组。');
+        return;
+      }
+      const grp = src.group ? SCHEMA.timepointGroups.find(g => g.key === src.group) : null;
+      const list = (grp ? kidsOf(grp.key) : tpSeq().filter(t => !t.group)).slice();
+      const si = list.findIndex(t => t.key === srcKey);
+      if (si < 0) return;
+      const [moved] = list.splice(si, 1);
+      let ti = list.findIndex(t => t.key === tgtKey);
+      if (ti < 0) return;
+      list.splice(before ? ti : ti + 1, 0, moved);
+      const others = tpSeq().filter(t => (grp ? t.group !== grp.key : !t.group));
+      const beforeKeys = tpSeq().map(t => t.key).join(',');
+      state.tpOrder = buildOrder(grp, list.map(t => t.key), others);
+      audit('reorder-tp', srcKey,
+            String(si + 1), String((before ? ti : ti + 1) + 1),
+            (grp ? '分组' + grp.label : '固定列') + '内拖拽调整顺序');
+      save(true); renderAll();
+      announce(`已移动到第 ${(before ? ti : ti + 1) + 1} 位。`);
+    }
+    tpHost.addEventListener('change', e => {
+      const renLbl = e.target.closest('[data-rename-label]');
+      if (renLbl){ renameSubTimepoint(renLbl.dataset.renameLabel, renLbl.value); return; }
+      const grpLbl = e.target.closest('[data-grp-label]');
+      if (grpLbl){ renameGroupLabel(grpLbl.dataset.grpLabel, grpLbl.value); return; }
+      const tt = e.target.closest('[data-testtime]');
+      if (tt){
+        const key = tt.dataset.testtime;
+        const v = String(tt.value).trim();
+        if (v && !/^\d{1,2}:\d{2}$/.test(v)){
+          // 只提示，不做硬校验打断录入：无效格式警告但不清除
+          announce('时刻格式应为 HH:MM，如 10:22。');
+        }
+        const oldV = (state.timepointTimes || {})[key] || '';
+        if (v === oldV) return;
+        (state.timepointTimes || (state.timepointTimes = {}))[key] = v;
+        audit('testtime', key, oldV, v, '实测钟点');
+        save(true); renderAll();
+        announce(`已记录「${SCHEMA.timepoints.find(t=>t.key===key)?.label || key}」实测钟点 ${v || '(清除)'}。`);
+      }
+    });
+    tpHost.addEventListener('blur', e => {
+      // 也支持 input 事件触发改名（边打字边改）
+      const renLbl = e.target.closest('[data-rename-label]');
+      if (renLbl) renameSubTimepoint(renLbl.dataset.renameLabel, renLbl.value);
+    }, true);
+  }
+  // 纤维丝序列复制（网站联动用）
+  const bcf = document.getElementById('btnCopyFilaments');
+  if (bcf) bcf.addEventListener('click', () => {
+    const txt = filamentListText();
+    refreshFilamentList(txt);
+    copyTextToClipboard(txt, `已复制 ${currentKit().fibers.length} 档力值，粘到网站 Custom Steps 即可。`);
+  });
+  const bcu = document.getElementById('btnCopyUsedFilaments');
+  // ── 归档到文件夹（绑定必须存在，否则按钮点了毫无反应）──
+  const bat = document.getElementById('btnArchiveTo');
+  if (bat) bat.addEventListener('click', () => { archiveToFolder(); });
+  const badl = document.getElementById('btnArchiveDownload');
+  if (badl) badl.addEventListener('click', () => { archiveDownloadAll(); });
+  const bap = document.getElementById('btnArchivePick');
+  if (bap) bap.addEventListener('click', () => { pickArchiveDir(); });
+  const bao = document.getElementById('btnArchiveOpen');
+  if (bao) bao.addEventListener('click', () => { openArchiveDir(); });
+
+  if (bcu) bcu.addEventListener('click', () => {
+    const txt = usedFilamentListText();
+    if (!txt){ announce('还没有任何序列数据，无法推断用到的档位。'); refreshFilamentList(); return; }
+    refreshFilamentList(txt);
+    const n = txt.split(',').length;
+    copyTextToClipboard(txt, `已复制实际用到的 ${n} 档。`);
+  });
+
+  document.getElementById('btnClear').addEventListener('click', () => {
+    if (!confirm('清空全部数据（含审计日志）？此操作可撤销。')) return;
+    snapshot();
+    const old = JSON.stringify({ subjects: state.subjects, cells: state.cells });
+    state.subjects = []; state.cells = {}; state.audit = [];
+    audit('clear', '全部', old, '', '');
+    save(true); renderAll();
+  });
+  document.getElementById('btnRestoreDraft').addEventListener('click', async () => {
+    // loadDraft 是 async（要先读 IndexedDB），必须 await，否则拿到的是 Promise
+    const d = await loadDraft();
+    if (d && d.state){
+      const added = applyDraft(d);
+      document.getElementById('bannerDraft').classList.remove('show');
+      announce(added ? `草稿已恢复（含 ${added} 个迁移的旧时间点）。` : '草稿已恢复。');
+    } else {
+      announce('草稿读取失败（存储可能已被清理）。');
+    }
+  });
+  document.getElementById('btnDiscardDraft').addEventListener('click', async () => {
+    if (!confirm('丢弃草稿并从空白开始？\n（IndexedDB + localStorage 两处都会清掉，此操作不可撤销）')) return;
+    await idbClear();                                  // ★ 必须清 IDB，否则下次打开又自动恢复
+    try{ localStorage.removeItem(LS_KEY); localStorage.removeItem(LS_META); }catch(e){}
+    state = defaultState();
+    SCHEMA.timepoints = SCHEMA.timepoints.filter(t => !t.deprecated);  // 清掉迁移来的废弃列
+    save(true);
+    renderAll();
+    document.getElementById('bannerDraft').classList.remove('show');
+    announce('草稿已丢弃，当前批次已清空。');
+  });
+  document.getElementById('btnCsv').addEventListener('click', () => {
+    const r = renderChecks();
+    if (r.blocking){
+      document.getElementById('bannerBlocked').classList.add('show');
+      document.getElementById('blockedMsg').textContent = blockedReason(r);
+      return;
+    }
+    document.getElementById('bannerBlocked').classList.remove('show');
+    download('vonfrey_'+ (state.meta.protocol||'batch') +'_'+ new Date().toISOString().slice(0,10) +'.csv', toCsv(), 'text/csv');
+  });
+  document.getElementById('btnJson').addEventListener('click', () => {
+    download('vonfrey_'+ (state.meta.protocol||'batch') +'_'+ new Date().toISOString().slice(0,10) +'.json', toJson(), 'application/json');
+  });
+  document.getElementById('btnEntryPy').addEventListener('click', () => {
+    const py = toEntryPy();
+    document.getElementById('out').textContent = py;
+    // entry_data.py 直接喂分析流水线：重名会产出非法 MICE（两只鼠抢同一个 mid），必须拦。
+    // 其它问题（缺项/格式）允许部分导出 —— 分批录入是正常流程。
+    const dupIds = dupSubjectIds();
+    if (dupIds.length){
+      document.getElementById('bannerBlocked').classList.add('show');
+      document.getElementById('blockedMsg').textContent =
+        `还不能导出 entry_data.py：动物编号重复（${list3(dupIds)}）——会导致 MICE 列表里出现重复 mid，流水线会算错。请先改成唯一编号。`;
+      announce('存在重复动物编号，已阻止 entry_data.py 导出。');
+      return;
+    }
+    document.getElementById('bannerBlocked').classList.remove('show');
+    download('vonfrey_'+ (state.meta.protocol||'batch') +'_entry_data_'+ new Date().toISOString().slice(0,10) +'.py', py, 'text/x-python');
+  });
+  document.getElementById('btnClip').addEventListener('click', async () => {
+    try{ await navigator.clipboard.writeText(toJson()); announce('JSON 已复制到剪贴板。'); }
+    catch(e){ announce('复制失败：浏览器拒绝剪贴板权限。'); }
+  });
+  document.getElementById('btnPrint').addEventListener('click', () => window.print());
+
+  // ── 联动区（与 DTU/Rigshospitalet 在线工具）──
+  document.getElementById('btnExportWeb').addEventListener('click', () => {
+    const csv = toWebsiteCsv();
+    const nRows = csv.split('\n').length - 1;
+    if (nRows === 0){ alert('当前没有可导出的数据。先录入序列与起点。'); return; }
+    document.getElementById('out').textContent = csv;
+    download('vonfrey_web_' + (state.meta.protocol||'batch') + '_' + new Date().toISOString().slice(0,10) + '.csv', csv, 'text/csv');
+    announce(`网站格式 CSV 已导出（${nRows} 行），可直接上传到 bioapps.shinyapps.io/von_frey_app/`);
+  });
+  document.getElementById('btnPreviewWebImport').addEventListener('click', previewWebImport);
+  document.getElementById('btnApplyWebImport').addEventListener('click', applyWebImport);
+  document.getElementById('btnImportWebFile').addEventListener('click', () => document.getElementById('webFile').click());
+  document.getElementById('webFile').addEventListener('change', e => {
+    const f = e.target.files[0];
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      document.getElementById('webPasteArea').value = reader.result;
+      previewWebImport();
+    };
+    reader.readAsText(f, 'utf-8');
+  });
+  document.getElementById('btnImportWeb').addEventListener('click', () => {
+    document.getElementById('webPasteArea').focus();
+    announce('把网站下载的 CSV 粘到下方文本框，或点"或选文件…"按钮。');
+  });
+  document.getElementById('btnClearWeb').addEventListener('click', () => {
+    if (!Object.keys(state.webImports || {}).length) return;
+    if (!confirm('清空全部网站导入值？此操作可撤销。')) return;
+    snapshot();
+    const old = JSON.stringify(state.webImports);
+    state.webImports = {};
+    audit('clear-web-imports', '全部网站导入', old, '', '清空网站导入');
+    save(true); renderAll(); renderWebCompare();
+  });
+
+  document.addEventListener('click', e => {
+    const a = e.target.closest('[data-goto]');
+    if (!a) return;
+    e.preventDefault();
+    const key = a.dataset.goto;
+    const seqKey = key.endsWith('|seq') ? key : null;
+    const targetId = seqKey ? `in-${cssId(seqKey)}` : null;
+    if (targetId){
+      const el = document.getElementById(targetId);
+      if (el){ el.focus(); el.select && el.select(); el.scrollIntoView({block:'center', behavior:'smooth'}); }
+    } else {
+      const [sid, tp] = key.split('|');
+      const cell = document.querySelector(`[data-tp-cell="${cssId(sid+'|'+tp)}"]`);
+      if (cell){ cell.scrollIntoView({block:'center', behavior:'smooth'}); const inp = cell.querySelector('.seq-inp'); if (inp) inp.focus(); }
+    }
+  });
+
+  document.getElementById('queryList').addEventListener('input', e => {
+    const t = e.target;
+    if (t.dataset.reason){
+      const k = t.dataset.reason;
+      const c = getCell(...k.split('|'));
+      const old = c.reason || '';
+      c.reason = t.value;
+      markPending(k+'|reason', old, t.value);
+      dirty = true; save();
+    }
+  });
+  document.getElementById('queryList').addEventListener('change', e => {
+    const t = e.target;
+    if (t.dataset.ack){
+      const k = t.dataset.ack;
+      const c = getCell(...k.split('|'));
+      const old = c.ack || false;
+      c.ack = t.checked;
+      markPending(k+'|ack', old, t.checked);
+      if (commitPending(k+'|ack')) save(true);
+      renderChecks();
+    }
+    if (t.dataset.reason){
+      if (commitPending(t.dataset.reason+'|reason')) save(true);
+      renderChecks();
+    }
+  });
+}
+
+function download(name, content, mime){
+  const blob = new Blob(['\uFEFF' + content], {type: mime + ';charset=utf-8'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ *  9. 启动
+ * ══════════════════════════════════════════════════════════════════════════ */
+async function init(){
+  state = defaultState();
+  let draftInfo = null;
+
+  // ① 自动恢复：优先 IndexedDB（更可靠），回退 localStorage
+  let recoveryFailed = false, recoveryErr = null;
+  try{
+    let parsed = null;
+    try { parsed = await idbGet(); } catch(e){}
+    if (!parsed || !parsed.state){
+      const raw = localStorage.getItem(LS_KEY);
+      if (raw) parsed = JSON.parse(raw);
+    }
+    // ★ P0-5：判断"有东西可恢复"不能只看 subjects.length ——
+    //   草稿可能 cells 有数据但 subjects 为空（删光动物但未清 cells / 部分写入），
+    //   那样会被静默跳过恢复，然后被下面的空 state 覆盖。
+    const hasAny = parsed && parsed.state &&
+      ((parsed.state.subjects||[]).length > 0 || Object.keys(parsed.state.cells||{}).length > 0);
+    if (hasAny && parsed.state){
+      // ★ 恢复前先把原始 payload 备份一份：万一 applyDraft 抛异常，
+      //   至少原始数据还在 localStorage 的备份键里，不会被空 state 覆盖后彻底消失。
+      try{ localStorage.setItem(LS_KEY + ':preapply:' + Date.now(), JSON.stringify(parsed)); }catch(e){}
+    }
+    if (hasAny){
+      const nSubjects = parsed.state.subjects.length;
+      const when = new Date(parsed.savedAt || Date.now());
+      const addedCount = applyDraft(parsed);   // 迁移 + 写 state + 重渲染，与按钮同一条路径
+      draftInfo = { nSubjects, when, addedCount };
+
+      // 横幅：先写文案（含两个按钮），再由 bindButtons() 绑定。
+      // 顺序不能反 —— 下面若再访问已被 innerHTML 替换掉的 #draftWhen 会拿到 null。
+      const banner = document.getElementById('bannerDraft');
+      banner.classList.add('show');
+      const bannerSpan = banner.querySelector('span:nth-child(2)');
+      if (bannerSpan){
+        bannerSpan.innerHTML =
+          '<b>已自动恢复上次草稿</b>（' + nSubjects + ' 只鼠 · ' + when.toLocaleString() + '）。' +
+          (addedCount
+            ? '<br><span style="color:var(--warn);">⚠ 检测到 ' + addedCount + ' 个旧版时间点已迁移加回 schema（见①节「已废弃时间点」），建议把数据复制到新子时间点后删掉旧列。</span>'
+            : '') +
+          '<br><button class="tiny sec" id="btnRestoreDraft" style="margin-left:6px;">重新从存储读取</button> ' +
+          '<button class="tiny sec" id="btnDiscardDraft">丢弃并重新开始</button>';
+      }
+      announce(addedCount
+        ? '已恢复 ' + nSubjects + ' 只鼠，并迁移 ' + addedCount + ' 个旧版时间点。'
+        : '已恢复上次草稿：' + nSubjects + ' 只鼠。');
+    }
+  }catch(e){
+    // ★ P0-5：恢复失败**不能静默**。原实现只 console.error，
+    //   面板渲染成空表，用户一操作 save() 就把原草稿覆盖没了。
+    //   现在：保留原始数据 + 亮横幅警告 + 禁止自动保存，直到用户显式处理。
+    recoveryFailed = true; recoveryErr = e;
+    console.error('自动恢复失败', e);
+    try{
+      const raw = localStorage.getItem(LS_KEY);
+      if (raw) localStorage.setItem(LS_KEY + ':corrupt:' + Date.now(), raw);
+    }catch(_){}
+  }
+  if (recoveryFailed){
+    storageBroken = true;   // ★ 阻止 save() 覆盖原草稿
+    try{
+      const b = document.getElementById('bannerDraft');
+      if (b){
+        b.classList.add('show');
+        const sp = b.querySelector('span:nth-child(2)');
+        if (sp) sp.innerHTML =
+          '<b style="color:#fff;">⚠ 自动恢复上次草稿失败，已暂停自动保存以防覆盖原数据。</b>' +
+          '<br><span style="opacity:.9;">错误：' + esc(String((recoveryErr && recoveryErr.message) || recoveryErr || '未知')) + '</span>' +
+          '<br>原始数据已备份到 localStorage 的 <code>:corrupt:</code> 键。' +
+          '<br>请先点「重新从存储读取」重试；确认不再需要后再点「丢弃并重新开始」。';
+        const rb = b.querySelector('#btnRestoreDraft');
+        if (rb) rb.hidden = false;
+      }
+    }catch(_){}
+  }
+
+  bindMeta();
+  bindGrid();
+  bindButtons();
+  renderAll();
+
+  document.addEventListener('keydown', e => {
+    if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 's'){
+      e.preventDefault();
+      flushPending();
+      save(true);
+      announce('已保存。');
+    }
+  });
+
+  window.addEventListener('beforeunload', e => {
+    if (dirty){ e.preventDefault(); e.returnValue = ''; }
+  });
+}
+
+// init() 由浏览器 DOMContentLoaded 触发；这里手动调一次
+if (document.readyState === 'loading'){
+  document.addEventListener('DOMContentLoaded', init);
+} else {
+  init();
+}
+</script>
+</body>
+</html>

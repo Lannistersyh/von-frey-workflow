@@ -1,0 +1,7 @@
+subject,group,timepoint,sequence,start_force_g,synthetic
+DEMO-001,Example-A,baseline,OXOXOX,0.16,true
+DEMO-001,Example-A,followup,OOXOXO,0.16,true
+DEMO-002,Example-B,baseline,XOXOXO,0.4,true
+DEMO-002,Example-B,followup,OXXOOX,0.4,true
+DEMO-003,Boundary-example,lower-bound,XXXXXX,0.16,true
+DEMO-004,Boundary-example,upper-bound,OOOOOO,0.6,true

@@ -1,0 +1,2 @@
+# Required for encrypted archive creation and recovery; not needed by the panel.
+cryptography>=42

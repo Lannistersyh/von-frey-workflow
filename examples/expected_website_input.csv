@@ -1,0 +1,7 @@
+ID,Final Filament,XO Pattern
+DEMO-001-baseline,0.4,OXOXOX
+DEMO-001-followup,0.4,OOXOXO
+DEMO-002-baseline,0.16,XOXOXO
+DEMO-002-followup,0.6,OXXOOX
+DEMO-003-lower-bound,0.07,XXXXXX
+DEMO-004-upper-bound,2.0,OOOOOO

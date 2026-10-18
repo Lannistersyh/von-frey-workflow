@@ -1,0 +1,10 @@
+{
+  "format": "von-frey-archive/v1",
+  "cipher": "AES-256-GCM",
+  "created_at": "2026-10-18T13:15:24.939428+00:00",
+  "ciphertext_file": "project-snapshot-2026-10-18.tar.gz.aesgcm",
+  "ciphertext_sha256": "9eda520a7a64183378958e30af5f6528bc7149451c92fd6bfc86db1f11e718ed",
+  "ciphertext_bytes": 1625874,
+  "source_file_count": 66,
+  "key_in_repository": false
+}
